@@ -231,6 +231,7 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+	KYTY_PROFILER_FUNCTION();
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
@@ -250,6 +251,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		const auto window_end = std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
 
 		if (DownloadBufferMemory(buffer, window_begin, window_end - window_begin)) {
+			// Must be CurrentTick(): DownloadBufferMemory queues its copy-out command into
+			// whatever recording is currently open, so that recording has to actually be
+			// submitted and complete before the staging buffer it wrote into can be read back.
 			const auto tick = m_scheduler.CurrentTick();
 			m_scheduler.Wait(tick);
 			m_scheduler.WaitPriorityOperations(tick);
@@ -579,6 +583,7 @@ bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::RunGarbageCollector() {
+	KYTY_PROFILER_FUNCTION();
 	const auto tick = m_gc_tick++;
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
@@ -615,7 +620,10 @@ void BufferCache::RunGarbageCollector() {
 		return;
 	}
 
-	// Publish all queued downloads before releasing their tracked pages and owners.
+	// Publish all queued downloads before releasing their tracked pages and owners. Must be
+	// CurrentTick(): DownloadBufferMemory above queued copy-out commands into the currently open
+	// recording, so that recording has to actually submit and complete -- see ReadMemory's wait
+	// for why waiting on an older per-buffer tick here would skip that entirely.
 	const auto completion_tick = m_scheduler.CurrentTick();
 	m_scheduler.Wait(completion_tick);
 	m_scheduler.WaitPriorityOperations(completion_tick);

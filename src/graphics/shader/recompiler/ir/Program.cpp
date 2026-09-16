@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/passes/SrtCompiler.h"
 
 #include <fmt/format.h>
 #include <map>
@@ -96,6 +97,9 @@ bool EquivalentValue(const ResourcePlan& program, Value left, Value right,
 }
 
 } // namespace
+
+ResourcePlan::ResourcePlan()                        = default;
+ResourcePlan::ResourcePlan(ResourcePlan&&) noexcept = default;
 
 ResourcePlan::~ResourcePlan() {
 	for (auto& inst: value_storage) {
