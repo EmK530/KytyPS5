@@ -505,15 +505,25 @@ struct UniformFillPlan {
 	std::array<Value, 4> values;
 };
 
+// Defined in passes/SrtCompiler.h; only forward-declared here to avoid a circular include
+// (SrtCompiler.h -> SrtWalker.h -> ShaderIR.h). ResourcePlan's constructor and move-constructor
+// are declared here but defined out-of-line in Program.cpp, which is where this type must be
+// complete -- the same pattern already used for this struct's destructor and move-assignment.
+struct CompiledSrtProgram;
+
 // Immutable runtime resource analysis retained by the shader cache. It owns descriptor/SRT,
 // uniform condition and fill values without retaining translated blocks.
 struct ResourcePlan {
-	ResourcePlan() = default;
+	// Declared (not defaulted) here and defined `= default` in Program.cpp instead: a defaulted
+	// special member that touches compiled_srt (a unique_ptr<CompiledSrtProgram>, incomplete in
+	// this header) still needs CompiledSrtProgram complete wherever it's actually defined, for
+	// exception-safety unwinding even though these bodies never explicitly touch the pointer.
+	ResourcePlan();
 	~ResourcePlan();
 
 	ResourcePlan(const ResourcePlan&)            = delete;
 	ResourcePlan& operator=(const ResourcePlan&) = delete;
-	ResourcePlan(ResourcePlan&&) noexcept         = default;
+	ResourcePlan(ResourcePlan&&) noexcept;
 	ResourcePlan& operator=(ResourcePlan&& other) noexcept;
 
 	ShaderType                    stage           = ShaderType::Unknown;
@@ -532,6 +542,12 @@ struct ResourcePlan {
 	bool                                resource_tracking_complete = false;
 	ShaderInfo                          info;
 	UniformFillPlan                     uniform_fill;
+	// Built once, right after ExtractResourcePlan finishes constructing this plan's final
+	// value_storage (see ResourceMaterialization.cpp) -- a flat, topologically-ordered form of
+	// the reachable SRT graph that SrtWalker.cpp's evaluator executes instead of recursively
+	// re-walking value_storage on every draw. Never null once srt_plan_complete is set by a
+	// successful BuildSrtPlan; SrtWalker falls back to the old recursive interpreter if it is.
+	std::unique_ptr<CompiledSrtProgram> compiled_srt;
 };
 
 struct Program: ResourcePlan {

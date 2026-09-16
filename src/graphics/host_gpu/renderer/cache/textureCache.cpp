@@ -1140,7 +1140,9 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 	if (desc.info.metadata.kind != ImageMetadataKind::Dcc) {
 		return;
 	}
-	const auto range = desc.info.metadata.range;
+	const auto range        = desc.info.metadata.range;
+	const auto current_tick = m_scheduler.CurrentTick();
+	bool       already_resolved_this_tick;
 	{
 		std::scoped_lock lock {m_lock};
 		auto& image         = m_slot_images[id];
@@ -1150,6 +1152,20 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 		if (range.size == 0 || desc.info.resources.levels != 1 || image.info.resources.levels != 1) {
 			return;
 		}
+		// A fast-clear stamps the whole DCC metadata range with one uniform code; an ordinary
+		// draw also touches these bytes (per-block compression state) but leaves a mixed
+		// pattern, so it never passes the all-same-code check below -- yet it re-marks the range
+		// GPU-dirty just the same, so gating purely on that flag re-triggers the synchronous
+		// readback on every draw to an already-bound render target. Gate on the scheduler tick
+		// instead: within one still-unsubmitted recording nothing new can land in guest memory
+		// after the first check, so later FindImage calls for the same image this tick are
+		// redundant. A real re-clear in a later recording still gets caught, since the tick will
+		// have advanced.
+		already_resolved_this_tick   = image.dcc_clear_checked_tick == current_tick;
+		image.dcc_clear_checked_tick = current_tick;
+	}
+	if (already_resolved_this_tick) {
+		return;
 	}
 	const auto layers = desc.info.TransferLayers();
 	// These one-mip surfaces use complete 4 KiB DCC metadata blocks.

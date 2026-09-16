@@ -1,11 +1,14 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/passes/SrtCompiler.h"
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <unordered_map>
@@ -482,6 +485,7 @@ private:
 	static uint64_t Float32Bits(float value) { return std::bit_cast<uint32_t>(value); }
 
 	bool EvaluateWide(Value value, uint64_t& result) {
+		KYTY_PROFILER_FUNCTION();
 		value = value.Resolve();
 		if (value.IsImmediate()) {
 			switch (value.GetType()) {
@@ -633,6 +637,7 @@ private:
 	}
 
 	bool EvaluateInst(const Inst& inst, uint64_t& result) {
+		KYTY_PROFILER_FUNCTION();
 		uint64_t   a       = 0;
 		uint64_t   b       = 0;
 		uint64_t   c       = 0;
@@ -983,11 +988,18 @@ const DescriptorSource* Source(const ResourcePlan& program, uint32_t source) {
 	return &program.descriptor_sources[source];
 }
 
-bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uint32_t> sources,
-                                const SrtRuntime& runtime, std::vector<DescriptorValue>& results,
-                                std::vector<uint32_t>& flat, bool evaluate_flat,
+// The original recursive-interpreter implementation, kept as-is: the shadow-validation reference
+// and the fallback for the (very rare, if ever hit) case where a ResourcePlan's compiled_srt is
+// missing. See EvaluateRuntimeSourcesCompiled below for the flat-executor replacement, and
+// EvaluateRuntimeSourcesImpl at the bottom of this namespace for the dispatch between them.
+bool EvaluateRuntimeSourcesInterpreted(const ResourcePlan& program,
+                                       std::span<const uint32_t> sources,
+                                       const SrtRuntime& runtime,
+                                       std::vector<DescriptorValue>& results,
+                                       std::vector<uint32_t>& flat, bool evaluate_flat,
                                 std::span<const uint8_t> clean_flat_slots,
                                 std::vector<uint8_t>&    active_sources) {
+	KYTY_PROFILER_FUNCTION();
 	if (!program.srt_plan_complete) {
 		return false;
 	}
@@ -1068,6 +1080,177 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 		flat = std::move(flattened);
 	}
 	return true;
+}
+
+// Same algorithm as EvaluateRuntimeSourcesInterpreted above, restructured around the flat
+// executor: two full passes over program.compiled_srt (clean, then raw, mirroring
+// clean_evaluator/evaluator above) instead of two recursive Evaluator instances, and every
+// Evaluate() call replaced by a plain results[]/computed[] lookup at a precompiled slot index.
+// Returns false (letting the caller fall back to the interpreter) if this plan was never
+// compiled -- expected not to happen once ExtractResourcePlan always compiles, but kept as a
+// safety valve rather than assuming.
+bool EvaluateRuntimeSourcesCompiled(const ResourcePlan& program, std::span<const uint32_t> sources,
+                                    const SrtRuntime& runtime,
+                                    std::vector<DescriptorValue>& results,
+                                    std::vector<uint32_t>& flat, bool evaluate_flat,
+                                    std::span<const uint8_t> clean_flat_slots,
+                                    std::vector<uint8_t>& active_sources) {
+	KYTY_PROFILER_FUNCTION();
+	if (!program.srt_plan_complete || program.compiled_srt == nullptr) {
+		return false;
+	}
+	if (std::ranges::any_of(clean_flat_slots, [](uint8_t clean) { return clean != 0u; }) &&
+	    runtime.read_specialization_memory == nullptr) {
+		return false;
+	}
+	const auto& compiled = *program.compiled_srt;
+
+	// Same reuse-across-calls reasoning as g_clean_scratch/g_raw_scratch in the interpreted path
+	// above: exactly one top-level call in flight per thread at a time.
+	thread_local SrtExecutorScratch g_clean_scratch;
+	thread_local SrtExecutorScratch g_raw_scratch;
+	ExecuteSrtProgram(compiled, runtime.read_specialization_memory, runtime.userdata,
+	                 runtime.user_data, runtime.shader_base, g_clean_scratch, kInvalidSlot, nullptr);
+	ExecuteSrtProgram(compiled, runtime.read_memory, runtime.userdata, runtime.user_data,
+	                 runtime.shader_base, g_raw_scratch, kInvalidSlot, &g_clean_scratch);
+
+	std::vector<uint8_t> active;
+	if (evaluate_flat) {
+		active.assign(program.descriptor_sources.size(), 1u);
+	}
+	if (evaluate_flat && !program.control_flow.empty()) {
+		for (const auto& block: program.control_flow) {
+			for (const auto source: block.sources) {
+				active.at(source) = 0u;
+			}
+		}
+		std::vector<uint8_t>  visited(program.control_flow.size());
+		std::vector<uint32_t> pending {0};
+		while (!pending.empty()) {
+			const auto index = pending.back();
+			pending.pop_back();
+			if (visited.at(index)) {
+				continue;
+			}
+			visited[index]    = 1u;
+			const auto& block = program.control_flow[index];
+			for (const auto source: block.sources) {
+				active[source] = 1u;
+			}
+			uint32_t   condition       = 0;
+			bool       have_condition = false;
+			const auto cond_slot = compiled.control_flow_condition_slots.at(index);
+			// A missing clean reader must never fall through to the raw pass's memory reads --
+			// matches the interpreted path's check above.
+			if (cond_slot != kInvalidSlot && runtime.read_specialization_memory != nullptr &&
+			    g_clean_scratch.computed[cond_slot] != 0u) {
+				condition      = static_cast<uint32_t>(g_clean_scratch.results[cond_slot]);
+				have_condition = true;
+			}
+			if (have_condition) {
+				pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
+			} else {
+				pending.insert(pending.end(), block.successors.begin(), block.successors.end());
+			}
+		}
+	}
+	std::vector<DescriptorValue> evaluated;
+	evaluated.reserve(sources.size());
+	for (const auto source_index: sources) {
+		const auto* source = Source(program, source_index);
+		if (source == nullptr) {
+			return false;
+		}
+		DescriptorValue value;
+		value.dword_count = source->dword_count;
+		if (!evaluate_flat || active[source_index]) {
+			const auto& slots = compiled.descriptor_source_slots.at(source_index);
+			for (uint32_t index = 0; index < source->dword_count; index++) {
+				const auto slot = slots[index];
+				if (slot == kInvalidSlot || g_raw_scratch.computed[slot] == 0u) {
+					return false;
+				}
+				value.dwords[index] = static_cast<uint32_t>(g_raw_scratch.results[slot]);
+			}
+		}
+		evaluated.push_back(value);
+	}
+	std::vector<uint32_t> flattened;
+	if (evaluate_flat) {
+		flattened.resize(program.srt_reads.size());
+		for (size_t i = 0; i < program.srt_reads.size(); i++) {
+			const auto& read  = program.srt_reads[i];
+			const bool  clean = read.flat_offset < clean_flat_slots.size() &&
+			                   clean_flat_slots[read.flat_offset] != 0u;
+			const auto& scratch = clean ? g_clean_scratch : g_raw_scratch;
+			const auto  slot    = compiled.srt_read_slots.at(i);
+			if (read.flat_offset >= flattened.size() || slot == kInvalidSlot ||
+			    scratch.computed[slot] == 0u) {
+				return false;
+			}
+			flattened[read.flat_offset] = static_cast<uint32_t>(scratch.results[slot]);
+		}
+	}
+	results        = std::move(evaluated);
+	active_sources = std::move(active);
+	if (evaluate_flat) {
+		flat = std::move(flattened);
+	}
+	return true;
+}
+
+// KYTY_SRT_SHADOW_VALIDATE=1 runs both the interpreted and compiled paths for every call and
+// EXITs loudly on any mismatch -- the two must be byte-identical by construction, since the
+// compiled path is a mechanical restructuring of the interpreted one, not a different algorithm.
+// Zero cost unless the env var is set.
+bool ShadowValidateEnabled() {
+	static const bool on = [] {
+		const char* v = std::getenv("KYTY_SRT_SHADOW_VALIDATE");
+		return v != nullptr && v[0] != '0';
+	}();
+	return on;
+}
+
+bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uint32_t> sources,
+                                const SrtRuntime& runtime, std::vector<DescriptorValue>& results,
+                                std::vector<uint32_t>& flat, bool evaluate_flat,
+                                std::span<const uint8_t> clean_flat_slots,
+                                std::vector<uint8_t>&    active_sources) {
+	KYTY_PROFILER_FUNCTION();
+	if (!ShadowValidateEnabled()) {
+		if (EvaluateRuntimeSourcesCompiled(program, sources, runtime, results, flat, evaluate_flat,
+		                                  clean_flat_slots, active_sources)) {
+			return true;
+		}
+		return EvaluateRuntimeSourcesInterpreted(program, sources, runtime, results, flat,
+		                                         evaluate_flat, clean_flat_slots, active_sources);
+	}
+	std::vector<DescriptorValue> interpreted_results;
+	std::vector<uint32_t>        interpreted_flat;
+	std::vector<uint8_t>         interpreted_active;
+	std::vector<DescriptorValue> compiled_results;
+	std::vector<uint32_t>        compiled_flat;
+	std::vector<uint8_t>         compiled_active;
+	const bool interpreted_ok = EvaluateRuntimeSourcesInterpreted(
+	    program, sources, runtime, interpreted_results, interpreted_flat, evaluate_flat,
+	    clean_flat_slots, interpreted_active);
+	const bool compiled_ok =
+	    EvaluateRuntimeSourcesCompiled(program, sources, runtime, compiled_results, compiled_flat,
+	                                  evaluate_flat, clean_flat_slots, compiled_active);
+	const bool mismatch =
+	    interpreted_ok != compiled_ok ||
+	    (interpreted_ok && (interpreted_results != compiled_results ||
+	                        interpreted_flat != compiled_flat || interpreted_active != compiled_active));
+	if (mismatch) {
+		EXIT("SRT shadow-validation mismatch: hash=0x%016" PRIx64 " stage=%s interpreted_ok=%d "
+		     "compiled_ok=%d\n",
+		     program.shader_hash, StageName(program.stage), interpreted_ok ? 1 : 0,
+		     compiled_ok ? 1 : 0);
+	}
+	results        = std::move(interpreted_results);
+	flat           = std::move(interpreted_flat);
+	active_sources = std::move(interpreted_active);
+	return interpreted_ok;
 }
 
 } // namespace

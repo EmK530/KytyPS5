@@ -64,6 +64,12 @@ public:
 	void            BufferFlush();
 	void            BufferFlushAndWait();
 	void            BufferWait();
+	// See CommandScheduler::CompleteReleaseMemWrite -- only safe for a RELEASE_MEM that already
+	// wrote its guest-visible value synchronously and scheduled no interrupt callback.
+	void            CompleteReleaseMemWrite();
+	// See CommandScheduler::CompleteReleaseMemInterrupt -- for a RELEASE_MEM that DOES request a
+	// guest interrupt/event; uses a smaller batch bound as a hedge against delaying it.
+	void            CompleteReleaseMemInterrupt();
 	HW::Context&    GetCtx() { return m_ctx; }
 	HW::UserConfig& GetUcfg() { return m_ucfg; }
 	HW::Shader&     GetShCtx() { return m_sh_ctx; }

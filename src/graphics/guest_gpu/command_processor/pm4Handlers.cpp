@@ -2284,7 +2284,13 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 			default: EXIT("unknown release_mem interrupt selector\n");
 		}
 		if (queued) {
-			cp.BufferFlush();
+			KYTY_PROFILER_BLOCK("CpOpReleaseMem: BufferFlush");
+			// The interrupt is already queued above, tagged with the tick this submission will
+			// get -- batching only delays when that tick is actually submitted/completes, not
+			// whether the event eventually fires. See CompleteReleaseMemInterrupt for the
+			// (smaller, hedged) batch bound used here versus the no-interrupt write path.
+			cp.CompleteReleaseMemInterrupt();
+			KYTY_PROFILER_END_BLOCK;
 		}
 	};
 
@@ -2323,7 +2329,21 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 		cp.WriteAtEndOfPipe32(cache_policy, event_write_dest, eop_event_type, cache_action,
 		                      event_index, event_source, dst_gpu_addr, static_cast<uint32_t>(value),
 		                      interrupt_selector, interrupt_context_id);
-		cp.BufferFlush();
+		if (interrupt_selector == 0x00 || interrupt_selector == 0x03) {
+			// WriteAtEndOfPipe already performed the guest-visible write synchronously above (no
+			// interrupt callback was scheduled for these selectors), so nothing depends on when
+			// the accumulated command buffer actually reaches the GPU -- safe to batch instead of
+			// paying a host vkQueueSubmit for every single fence update.
+			cp.CompleteReleaseMemWrite();
+		} else {
+			// interrupt_selector 0x01/0x02 route through WriteAtEndOfPipe's interrupt path, which
+			// schedules a callback gated on this submission's tick actually completing on the
+			// GPU -- flush now so a guest thread that may be blocked waiting on it isn't stalled
+			// behind a batching window.
+			KYTY_PROFILER_BLOCK("CpOpReleaseMem: BufferFlush");
+			cp.BufferFlush();
+			KYTY_PROFILER_END_BLOCK;
+		}
 
 		return 7;
 	}
@@ -2341,7 +2361,9 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 		                      event_index, event_source, dst_gpu_addr, static_cast<uint32_t>(value),
 		                      interrupt_selector, interrupt_context_id);
 		if (interrupt_selector == 0x01) {
+			KYTY_PROFILER_BLOCK("CpOpReleaseMem: BufferFlush");
 			cp.BufferFlush();
+			KYTY_PROFILER_END_BLOCK;
 		}
 
 		return 7;

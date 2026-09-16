@@ -29,6 +29,17 @@ public:
 	void           Flush(SubmitInfo& submit);
 	void           FlushAndWait();
 	void           Finish();
+	// Bounds how many no-interrupt RELEASE_MEM fence writes accumulate in one command buffer
+	// before it is submitted, so consecutive fence updates that nothing is blocked waiting on
+	// don't each pay a host vkQueueSubmit. Only safe for a RELEASE_MEM whose guest-visible write
+	// already happened synchronously and that scheduled no interrupt callback -- see the call
+	// site in pm4Handlers.cpp CpOpReleaseMem for the exact condition. Never waits itself.
+	void           CompleteReleaseMemWrite();
+	// Same idea, but for a RELEASE_MEM that DOES request a guest interrupt/event (a guest thread
+	// may be waiting on it via an event queue) -- deferring the flush delays real event delivery,
+	// so this uses a much smaller batch bound than CompleteReleaseMemWrite as a hedge, trading
+	// some of the possible win for less added latency. Never waits itself.
+	void           CompleteReleaseMemInterrupt();
 	CommandBuffer& BeginCommand();
 	uint64_t       Submit(SubmitInfo submit = {});
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
@@ -89,6 +100,8 @@ private:
 	GraphicContext&              m_graphics;
 	CommandPool                  m_command_pool;
 	CommandBuffer                m_command;
+	uint32_t                     m_recorded_release_mem_writes     = 0;
+	uint32_t                     m_recorded_release_mem_interrupts = 0;
 	std::queue<PendingOperation> m_pending_operations;
 	std::queue<PendingOperation> m_priority_operations;
 	std::mutex                   m_operation_mutex;
