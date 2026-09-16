@@ -1446,6 +1446,15 @@ std::vector<uint32_t> SelectionRegion(const Graph& graph, const BasicBlock& head
 		if (block == nullptr) {
 			continue;
 		}
+		// A block not dominated by the header is reached by some path that never goes
+		// through the header at all, so it can't be part of this selection's construct --
+		// it's shared code the selection merely joins, not a block requiring a private
+		// entry. Leave it (and anything only reachable through it) out of the region;
+		// walking into it here previously produced false "externally entered" failures
+		// for ordinary early-exit chains that skip ahead to a shared join block.
+		if (!graph.Dominates(header.id, block_id)) {
+			continue;
+		}
 		// A return terminates its own block; a branch to a shared return still has to
 		// obey selection entry/exit rules, just like any other branch.
 		AddUnique(region, block_id);
