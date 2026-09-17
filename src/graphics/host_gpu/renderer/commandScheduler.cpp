@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 namespace Libs::Graphics {
@@ -27,6 +28,21 @@ void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint3
 	            what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
 	            debug_submit, arg0, arg1, arg2, arg3, arg4);
 	std::fflush(stdout);
+}
+
+// KYTY_DRAW_FLUSH_INTERVAL=N overrides CompleteDraw()'s periodic non-blocking flush interval.
+// Defaults to 16 -- validated against real gameplay, where it cut the fraction of the main thread
+// spent in MasterSemaphore::Wait from dominating the frame to under 10%. Explicitly setting it to
+// 0 disables the flush entirely, same as before this had a default.
+uint32_t DrawFlushInterval() {
+	static const uint32_t interval = [] {
+		const char* v = std::getenv("KYTY_DRAW_FLUSH_INTERVAL");
+		if (v == nullptr) {
+			return 16u;
+		}
+		return static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+	}();
+	return interval;
 }
 
 } // namespace
@@ -189,6 +205,15 @@ void CommandScheduler::CompleteReleaseMemInterrupt() {
 	// later instead of immediately.
 	constexpr uint32_t InterruptsPerSubmission = 8;
 	if (++m_recorded_release_mem_interrupts < InterruptsPerSubmission) {
+		return;
+	}
+	CheckActive();
+	Flush();
+}
+
+void CommandScheduler::CompleteDraw() {
+	const auto interval = DrawFlushInterval();
+	if (interval == 0u || ++m_recorded_draws < interval) {
 		return;
 	}
 	CheckActive();
@@ -421,6 +446,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	m_command.m_buffer                = nullptr;
 	m_recorded_release_mem_writes     = 0;
 	m_recorded_release_mem_interrupts = 0;
+	m_recorded_draws                  = 0;
 	return tick;
 }
 

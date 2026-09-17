@@ -1,11 +1,13 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/regionDefinitions.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
@@ -92,9 +94,61 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	Log::WriteToConsoleAndLog(message);
 }
 
-bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
-	return value != nullptr &&
-	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
+// Caches TryReadGpuCleanBacking's per-page dirty verdict for the lifetime of a single
+// MaterializeResources call (see ReadShaderGuestMemory below, which the caller wires up as this
+// scratch space's owner via SrtRuntime::userdata). A shader's SRT resource-specialization reads
+// commonly pull several adjacent 4-byte descriptor words out of the same buffer, all landing in
+// the same TRACKER_PAGE_SIZE page -- every one of them currently pays the same mutex-guarded
+// buffer/texture-cache dirty query for an answer that cannot have changed since the previous read
+// a few nanoseconds earlier in the same synchronous, single-threaded evaluation (this only runs on
+// the GPU thread, and nothing this evaluation does submits GPU work that could mark a page dirty
+// mid-pass). Small fixed capacity: a shader's resource plan touches only a handful of distinct
+// pages in practice; anything past capacity just falls back to the uncached path.
+struct GpuCleanReadCache {
+	static constexpr size_t Capacity = 8;
+	std::array<uint64_t, Capacity> pages {};
+	std::array<bool, Capacity>     dirty {};
+	size_t                         count = 0;
+
+	[[nodiscard]] bool Find(uint64_t page, bool& out_dirty) const {
+		for (size_t i = 0; i < count; i++) {
+			if (pages[i] == page) {
+				out_dirty = dirty[i];
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void Insert(uint64_t page, bool is_dirty) {
+		if (count < Capacity) {
+			pages[count] = page;
+			dirty[count] = is_dirty;
+			count++;
+		}
+	}
+};
+
+bool ReadShaderGuestMemory(void* userdata, uint64_t address, uint32_t* value) {
+	if (value == nullptr) {
+		return false;
+	}
+	auto* cache = static_cast<GpuCleanReadCache*>(userdata);
+	const auto page      = Common::AlignDown(address, TRACKER_PAGE_SIZE);
+	const auto last_page = Common::AlignDown(address + sizeof(*value) - 1, TRACKER_PAGE_SIZE);
+	// A 4-byte read spanning two pages only happens from a deliberately misaligned address -- SRT/
+	// descriptor reads are always naturally 4-byte aligned in practice -- so just skip the cache
+	// for that vanishingly rare case rather than reason about two pages' verdicts at once.
+	if (cache == nullptr || page != last_page) {
+		return Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
+	}
+	bool cached_dirty = false;
+	if (cache->Find(page, cached_dirty)) {
+		return !cached_dirty && Libs::LibKernel::Memory::TryReadBacking(address, value, sizeof(*value));
+	}
+	const bool ok = Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
+	cache->Insert(page, !ok);
+	return ok;
 }
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
@@ -282,9 +336,14 @@ struct PipelineCache::ProgramCache {
 		auto                                         entry = programs.find(lookup_key);
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		// Scoped to this call only -- see GpuCleanReadCache's comment for why a page's dirty
+		// verdict can be safely reused across every read within one synchronous evaluation but
+		// must never survive past it.
+		GpuCleanReadCache                            clean_read_cache;
 		const ShaderRecompiler::IR::SrtRuntime       runtime {
 		    .user_data                  = params.user_data,
 		    .shader_base                = params.Base(),
+		    .userdata                   = &clean_read_cache,
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {
