@@ -1109,10 +1109,19 @@ bool EvaluateRuntimeSourcesCompiled(const ResourcePlan& program, std::span<const
 	// above: exactly one top-level call in flight per thread at a time.
 	thread_local SrtExecutorScratch g_clean_scratch;
 	thread_local SrtExecutorScratch g_raw_scratch;
-	ExecuteSrtProgram(compiled, runtime.read_specialization_memory, runtime.userdata,
-	                 runtime.user_data, runtime.shader_base, g_clean_scratch, kInvalidSlot, nullptr);
+	// compiled.needs_clean_pass is fixed at compile time from the exact same data (clean_flat_slots/
+	// control_flow) that produced every op's srt_slot_clean flag, so when it's false no op in this
+	// program can ever read g_clean_scratch -- running the clean pass would just compute results
+	// nothing looks at. Skipping it also means the raw pass must not be handed a stale
+	// g_clean_scratch left over from a previous, unrelated program's clean pass.
+	const auto* clean_scratch = compiled.needs_clean_pass ? &g_clean_scratch : nullptr;
+	if (compiled.needs_clean_pass) {
+		ExecuteSrtProgram(compiled, runtime.read_specialization_memory, runtime.userdata,
+		                 runtime.user_data, runtime.shader_base, g_clean_scratch, kInvalidSlot,
+		                 nullptr);
+	}
 	ExecuteSrtProgram(compiled, runtime.read_memory, runtime.userdata, runtime.user_data,
-	                 runtime.shader_base, g_raw_scratch, kInvalidSlot, &g_clean_scratch);
+	                 runtime.shader_base, g_raw_scratch, kInvalidSlot, clean_scratch);
 
 	std::vector<uint8_t> active;
 	if (evaluate_flat) {

@@ -90,6 +90,9 @@ public:
 			    condition.IsEmpty() ? kInvalidSlot : CompileValue(condition);
 		}
 		result.ops = std::move(m_ops);
+		result.needs_clean_pass =
+		    !m_program.control_flow.empty() ||
+		    std::ranges::any_of(m_program.clean_flat_slots, [](uint8_t clean) { return clean != 0u; });
 		return result;
 	}
 
@@ -203,7 +206,6 @@ private:
 				}
 				CompiledOp op;
 				op.kind           = CompiledOpKind::ReadConst;
-				op.srt_slot       = slot_index;
 				op.srt_slot_clean = slot_index < m_program.clean_flat_slots.size() &&
 				                    m_program.clean_flat_slots[slot_index] != 0u;
 				op.num_operands = 1;
@@ -423,7 +425,6 @@ private:
 		}
 		CompiledOp op;
 		op.kind                 = CompiledOpKind::RawRead;
-		op.memory_flags         = flags;
 		op.is_const_buffer_read = is_const_buffer_read;
 		op.immediate = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(mem.offset)));
 		op.num_operands = is_const_buffer_read ? 5 : 3;
@@ -481,6 +482,10 @@ void ExecutePass(const CompiledSrtProgram& compiled, SrtMemoryReader read_memory
 	}
 	auto* results  = scratch.results.data();
 	auto* computed = scratch.computed.data();
+	// One memset instead of a `computed[i] = 0u` store threaded through every loop iteration below
+	// -- same total writes, but as a single vectorizable pass instead of interleaved with each op's
+	// own branchy case body.
+	std::memset(computed, 0, count * sizeof(*computed));
 
 	const auto operand_ok = [&](const CompiledOp& op, uint32_t index) {
 		const auto slot = op.operands[index];
@@ -489,7 +494,6 @@ void ExecutePass(const CompiledSrtProgram& compiled, SrtMemoryReader read_memory
 
 	for (uint32_t i = 0; i < count; i++) {
 		const auto& op = compiled.ops[i];
-		computed[i]    = 0u;
 		switch (op.kind) {
 			case CompiledOpKind::AlwaysFails: break;
 			case CompiledOpKind::Constant:

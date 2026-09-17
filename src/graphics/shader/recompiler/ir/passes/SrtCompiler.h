@@ -62,9 +62,7 @@ struct CompiledOp {
 	                                  kInvalidSlot};
 	uint64_t    immediate = 0;   // Constant: the value. GetUserData: sgpr offset.
 	uint32_t    component = 0;   // CompositeExtract*: which component/half.
-	MemoryFlags memory_flags {}; // RawRead only.
 	bool        is_const_buffer_read = false; // RawRead: ReadConstBuffer vs LoadAddressU32.
-	uint32_t    srt_slot             = 0;     // ReadConst only.
 	bool        srt_slot_clean = false; // ReadConst only: read from the clean pass's results
 	                                    // instead of this pass's own.
 };
@@ -79,6 +77,14 @@ struct CompiledSrtProgram {
 	// Compiled slot for each control_flow[i].condition, parallel to ResourcePlan::control_flow.
 	// kInvalidSlot when that block's condition is empty (unconditional edge).
 	std::vector<uint32_t> control_flow_condition_slots;
+	// True if some ReadConst op in `ops` has srt_slot_clean set, or the program has control flow
+	// whose branch condition must be resolved through the clean pass -- both are compile-time-fixed
+	// properties of ResourcePlan::clean_flat_slots/control_flow, so this is computed once here
+	// rather than re-checked on every evaluation. When false, no op anywhere in this program can
+	// ever consult a clean-pass scratch buffer, so the caller can skip running the clean pass
+	// entirely instead of computing results nothing will read -- see EvaluateRuntimeSourcesCompiled
+	// in SrtWalker.cpp.
+	bool needs_clean_pass = false;
 };
 
 // Builds a CompiledSrtProgram covering every Inst reachable from program.descriptor_sources,

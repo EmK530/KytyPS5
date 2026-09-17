@@ -276,6 +276,10 @@ void CommandProcessor::CompleteReleaseMemInterrupt() {
 	GetScheduler().CompleteReleaseMemInterrupt();
 }
 
+void CommandProcessor::CompleteDraw() {
+	GetScheduler().CompleteDraw();
+}
+
 void CommandProcessor::BufferFlushAndWait() {
 	GetScheduler().FlushAndWait();
 }
@@ -889,6 +893,7 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 		     args.base_vertex, args.first_instance);
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
+	CompleteDraw();
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count) {
@@ -1159,6 +1164,7 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		args.instance_count = m_num_instances;
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);
+	CompleteDraw();
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
