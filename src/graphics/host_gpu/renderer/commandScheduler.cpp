@@ -248,15 +248,8 @@ void CommandScheduler::Wait(uint64_t tick) {
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
 		CheckActive();
-		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
-		// Current(). The wrapper stays stable while its pooled Vulkan buffer is retired. Deferred
-		// resources are released only at the next GPU operation boundary.
-		KYTY_PROFILER_BLOCK("CommandScheduler::Wait (forced submit-then-wait)");
-		const auto submitted_tick = Submit();
-		EXIT_IF(submitted_tick != tick);
-		m_master.Wait(tick);
+		Submit();
 		BeginNext();
-		KYTY_PROFILER_END_BLOCK;
 	} else {
 		m_master.Wait(tick);
 	}

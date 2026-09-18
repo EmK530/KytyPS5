@@ -174,9 +174,8 @@ void GuestGpu::Submit(std::span<const uint32_t> draw_commands,
 void GuestGpu::SubmitCompute(uint32_t queue, std::span<const uint32_t> commands) {
 	EXIT_IF(commands.empty());
 	GpuMutexLock lock(m_submission_mutex);
-
 	EXIT_NOT_IMPLEMENTED(queue < ComputeQueueBase || queue >= ComputeQueueBase + ComputeQueueCount);
-
+    
 	const auto compute_queue = queue - ComputeQueueBase;
 	Submission submission;
 	submission.type     = SubmissionType::Compute;
@@ -897,7 +896,6 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 		     args.base_vertex, args.first_instance);
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
-	CompleteDraw();
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count) {
@@ -1086,7 +1084,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
-                                      uint32_t thread_group_z, uint32_t mode) {
+									  uint32_t thread_group_z, uint32_t mode,
+									  uint64_t args_addr) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 
 	uint32_t frame_num = 0;
@@ -1120,7 +1119,8 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		// local_y        = std::max(cs.num_thread_y, 1u);
 		// local_z        = std::max(cs.num_thread_z, 1u);
 		m_renderer.GetRenderExecutor().DispatchDirect(m_submit_id, CurrentBuffer(), thread_group_x,
-		                                              thread_group_y, thread_group_z, mode);
+		                                              thread_group_y, thread_group_z, mode,
+		                                              args_addr);
 	}
 
 	/*constexpr uint32_t DispatchInitiatorUseThreadDimensions = 1u << 5u;
@@ -1152,13 +1152,13 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode) {
 		uint32_t thread_group_y;
 		uint32_t thread_group_z;
 	};
-
 	EXIT_NOT_IMPLEMENTED(m_dispatch_indirect_args_base_addr == 0);
 
 	const auto args_addr = m_dispatch_indirect_args_base_addr + data_offset;
 	auto*      args      = reinterpret_cast<const DispatchIndirectArgs*>(args_addr);
 
-	DispatchDirect(args->thread_group_x, args->thread_group_y, args->thread_group_z, mode);
+	DispatchDirect(args->thread_group_x, args->thread_group_y, args->thread_group_z, mode,
+				   args_addr);
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
@@ -1168,7 +1168,7 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		args.instance_count = m_num_instances;
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);
-	CompleteDraw();
+
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
