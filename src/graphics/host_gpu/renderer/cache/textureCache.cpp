@@ -31,7 +31,7 @@ namespace Libs::Graphics {
 
 namespace {
 
-constexpr uint64_t NumFramesBeforeRemoval = 32;
+constexpr uint64_t NumFramesBeforeRemoval = 2048;
 
 [[nodiscard]] bool DecodeDccClear(const TextureCache::ImageDesc& desc, uint8_t code,
                                   vk::ClearColorValue& clear) {
@@ -180,12 +180,20 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 		constexpr int64_t GiB = 1024ll * 1024 * 1024;
 		const auto        budget =
 		    static_cast<int64_t>(std::min<uint64_t>(m_graphics.GetTotalMemoryBudget(), INT64_MAX));
-		const auto threshold = std::min<int64_t>(budget, 8 * GiB);
+		//const auto threshold = std::min<int64_t>(budget, 8 * GiB);
+        const auto threshold = budget - 1 * GiB;
 		m_pressure_gc_memory = static_cast<uint64_t>(
-		    std::max<int64_t>(std::min(budget - 6 * threshold / 10, budget - GiB), GiB + GiB / 2));
+		    std::max<int64_t>(std::min(budget - 5 * threshold / 10, budget - GiB), GiB + GiB / 2));
 		m_critical_gc_memory = static_cast<uint64_t>(
 		    std::max<int64_t>(std::min(budget - 2 * threshold / 10, budget - GiB / 2), 3 * GiB));
 		m_trigger_gc_memory = static_cast<uint64_t>(std::max<int64_t>((budget - threshold) / 2, 0));
+
+        std::printf("\n[TextureCache] Total memory budget: %.02lf GiB\n\n", (double)budget / GiB);
+        std::printf("[TextureCache] Initialized memory budget: %.02lf GiB\n\n", (double)threshold / GiB);
+
+        std::printf("[TextureCache] Memory GC enabling threshold: %.02lf GiB\n", (double)m_trigger_gc_memory / GiB);
+        std::printf("[TextureCache] Memory GC pressure threshold: %.02lf GiB\n", (double)m_pressure_gc_memory / GiB);
+        std::printf("[TextureCache] Memory GC critical threshold: %.02lf GiB\n\n", (double)m_critical_gc_memory / GiB);
 	}
 }
 
@@ -319,6 +327,7 @@ void TextureCache::DeleteImage(ImageId id) {
 			}
 		});
 		for (const auto association: associations) {
+            std::printf("[TextureCache] Image ID %i was freed regularly\n", association);
 			FreeImage(association);
 		}
 	}
@@ -798,6 +807,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 		           "TextureCache: unsupported unequal-sample depth overlap copy (%u -> %u)\n",
 		           cached.backing.samples, replacement.backing.samples);
 	}
+    //std::printf("[TextureCache] Image ID %i was freed due to ResolveDepthOverlap\n", cached_id);
 	FreeImage(cached_id);
 	return replacement_id;
 }
@@ -834,6 +844,7 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		    (requested.resources == cached.info.resources &&
 		     requested.mip_layout != cached.info.mip_layout)) {
 			if (safe_to_delete) {
+                //std::printf("[TextureCache] Image ID %i was freed due to ResolveOverlap\n", cached_id);
 				FreeImage(cached_id);
 			}
 			return {merged_id};
@@ -893,10 +904,16 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		m_slot_images[merged_id].binding.is_target |= cached.binding.is_target;
 		CopyImageMip(merged_id, cached_id, static_cast<uint32_t>(mip),
 		             static_cast<uint32_t>(layer));
+        std::printf("[TextureCache] Image ID %i was freed due to Mip\n", cached_id);
 		FreeImage(cached_id);
 		return {merged_id};
 	}
 	if (requested.data.address >= cached.info.data.address && safe_to_delete) {
+        if(safe_to_delete) {
+            std::printf("[TextureCache] Image ID %i was freed due to being stale\n", cached_id);
+        } else {
+            std::printf("[TextureCache] Image ID %i was freed due to OOB address\n", cached_id);
+        }
 		FreeImage(cached_id);
 	}
 	return {merged_id};
@@ -920,6 +937,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId source_id) {
 	} else {
 		CopyImage(expanded_id, source_id);
 	}
+    std::printf("[TextureCache] Image ID %i was freed due to expansion\n", source_id);
 	FreeImage(source_id);
 	return expanded_id;
 }
@@ -1315,6 +1333,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			if (exact_format && resolved.info.pixel_format != desc.info.pixel_format) {
 				result = {};
 			} else if (resolved.info.resources < desc.info.resources) {
+                std::printf("[TextureCache] Image ID %i was freed due to lack of resources\n", result);
 				FreeImage(result);
 				result = {};
 			}
@@ -1954,6 +1973,7 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 		if (owner == nullptr) {
 			continue;
 		}
+        std::printf("[TextureCache] Image ID %i was freed due to memory unmap\n", id);
 		FreeImage(id);
 	}
 }
@@ -1970,7 +1990,7 @@ void TextureCache::RunGarbageCollector() {
 	const auto collect = [&](bool allow_aggressive) {
 		bool           pressured  = m_total_used_memory >= m_pressure_gc_memory;
 		bool           aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
-		const uint64_t age       = std::min<uint64_t>(aggressive ? 160 : pressured ? 80 : 16, tick);
+		const uint64_t age       = std::min<uint64_t>(aggressive ? 80 : pressured ? 160 : 1024, tick);
 		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
 		std::vector<ImageId> candidates;
 		candidates.reserve(deletions);
@@ -2001,6 +2021,7 @@ void TextureCache::RunGarbageCollector() {
 					continue;
 				}
 			}
+            std::printf("[TextureCache] Image ID %i was freed due to garbage collection\n", id);
 			FreeImage(id);
 			if (m_total_used_memory < m_critical_gc_memory && aggressive) {
 				deletions >>= 2;
