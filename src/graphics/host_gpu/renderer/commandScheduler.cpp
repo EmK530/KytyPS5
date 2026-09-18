@@ -245,12 +245,18 @@ void CommandScheduler::Finish() {
 
 void CommandScheduler::Wait(uint64_t tick) {
 	KYTY_PROFILER_FUNCTION();
-	EXIT_IF(tick > CurrentTick());
-	if (tick == CurrentTick()) {
+	if (m_master.IsFree(tick)) [[likely]] {
+		return;
+	}
+
+	// Submit only if the current command buffer is active and open for recording.
+	if (tick == CurrentTick() && !m_command.IsInvalid()) {
 		CheckActive();
 		Submit();
+		m_master.Wait(tick);
 		BeginNext();
 	} else {
+		// Waiting for a previously submitted tick: no need to submit the current (possibly closed) buffer.
 		m_master.Wait(tick);
 	}
 }

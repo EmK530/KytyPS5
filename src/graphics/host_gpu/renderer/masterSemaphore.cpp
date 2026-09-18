@@ -3,6 +3,9 @@
 #include "common/assert.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace Libs::Graphics {
 
@@ -37,17 +40,27 @@ void MasterSemaphore::Refresh() {
 }
 
 void MasterSemaphore::Wait(uint64_t tick) {
-	if (IsFree(tick)) {
+	if (IsFree(tick)) [[likely]] {
 		return;
 	}
 	Refresh();
-	if (IsFree(tick)) {
+	if (IsFree(tick)) [[likely]] {
 		return;
 	}
 
-	// Profiling-only zone: this is the actual CPU-blocks-on-GPU stall. Everything above this
-	// point is a fast non-blocking check; only reaching here means the GPU genuinely hasn't
-	// caught up yet.
+	// Fast spin without kernel syscalls
+	for (int i = 0; i < 300; ++i) {
+#if defined(_M_X64) || defined(__x86_64__)
+		_mm_pause();
+#endif
+		if ((i & 15) == 0) {
+			Refresh();
+			if (IsFree(tick)) [[likely]] {
+				return;
+			}
+		}
+	}
+
 	KYTY_PROFILER_BLOCK("MasterSemaphore::Wait (blocked on GPU)");
 
 	vk::SemaphoreWaitInfo wait_info {};
@@ -55,9 +68,12 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
-	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-	Refresh();
+	// Wait in short 1ms increments to avoid a long kernel sleep; poll/refresh between waits.
+	constexpr uint64_t kTimeoutNs = 1'000'000; // 1 ms
+	while (!IsFree(tick)) {
+		m_graphics.device.waitSemaphores(&wait_info, kTimeoutNs);
+		Refresh();
+	}
 
 	KYTY_PROFILER_END_BLOCK;
 }

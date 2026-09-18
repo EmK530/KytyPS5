@@ -1174,8 +1174,10 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
 	BufferFlush();
 
-	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
-	                                      static_cast<int>(display_buffer_index));
+	// Use VideoOut's throttled flip helper to avoid blocking the command processor
+	// while preventing an unbounded backlog of pending flips.
+	m_renderer.GetVideoOut().ThrottleFlip(static_cast<int>(video_out_handle),
+										  static_cast<int>(display_buffer_index));
 }
 
 template <typename T>
