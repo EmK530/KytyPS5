@@ -213,6 +213,8 @@ private:
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
 	std::vector<uint32_t>                 m_image_occurrences;
 
+    
+
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;
 };
