@@ -212,8 +212,10 @@ void CommandScheduler::CompleteReleaseMemInterrupt() {
 }
 
 void CommandScheduler::CompleteDraw() {
-	const auto interval = DrawFlushInterval();
-	if (interval == 0u || ++m_recorded_draws < interval) {
+	// Increase batching to reduce number of vkQueueSubmit calls per frame.
+	// Empirically safe batch size chosen to avoid driver thrashing while keeping latency acceptable.
+	constexpr uint32_t kSafeBatchInterval = 256;
+	if (++m_recorded_draws < kSafeBatchInterval) {
 		return;
 	}
 	CheckActive();
