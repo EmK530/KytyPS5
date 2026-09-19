@@ -1010,7 +1010,11 @@ bool EvaluateRuntimeSourcesInterpreted(const ResourcePlan& program,
 	const auto           clean_runtime = CleanRuntime(runtime);
 	Evaluator            clean_evaluator(program, clean_runtime);
 	Evaluator            evaluator(program, runtime, clean_flat_slots, &clean_evaluator);
-	std::vector<uint8_t> active;
+	thread_local std::vector<uint8_t> active;
+	thread_local std::vector<uint8_t> visited;
+	thread_local std::vector<uint32_t> pending;
+	thread_local std::vector<DescriptorValue> evaluated;
+	thread_local std::vector<uint32_t> flattened;
 	if (evaluate_flat) {
 		active.assign(program.descriptor_sources.size(), 1u);
 	}
@@ -1020,8 +1024,9 @@ bool EvaluateRuntimeSourcesInterpreted(const ResourcePlan& program,
 				active.at(source) = 0u;
 			}
 		}
-		std::vector<uint8_t>  visited(program.control_flow.size());
-		std::vector<uint32_t> pending {0};
+		visited.assign(program.control_flow.size(), 0u);
+		pending.clear();
+		pending.push_back(0);
 		while (!pending.empty()) {
 			const auto index = pending.back();
 			pending.pop_back();
@@ -1043,7 +1048,7 @@ bool EvaluateRuntimeSourcesInterpreted(const ResourcePlan& program,
 			}
 		}
 	}
-	std::vector<DescriptorValue> evaluated;
+	evaluated.clear();
 	evaluated.reserve(sources.size());
 	for (const auto source_index: sources) {
 		const auto* source = Source(program, source_index);
@@ -1061,7 +1066,7 @@ bool EvaluateRuntimeSourcesInterpreted(const ResourcePlan& program,
 		}
 		evaluated.push_back(value);
 	}
-	std::vector<uint32_t> flattened;
+	// flattened is a thread-local scratch buffer declared above
 	if (evaluate_flat) {
 		flattened.resize(program.srt_reads.size());
 		for (const auto& read: program.srt_reads) {

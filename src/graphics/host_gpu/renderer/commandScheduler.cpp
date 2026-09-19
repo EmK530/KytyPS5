@@ -212,8 +212,10 @@ void CommandScheduler::CompleteReleaseMemInterrupt() {
 }
 
 void CommandScheduler::CompleteDraw() {
-	const auto interval = DrawFlushInterval();
-	if (interval == 0u || ++m_recorded_draws < interval) {
+	// Increase batching to reduce number of vkQueueSubmit calls per frame.
+	// Empirically safe batch size chosen to avoid driver thrashing while keeping latency acceptable.
+	constexpr uint32_t kSafeBatchInterval = 256;
+	if (++m_recorded_draws < kSafeBatchInterval) {
 		return;
 	}
 	CheckActive();
@@ -245,19 +247,18 @@ void CommandScheduler::Finish() {
 
 void CommandScheduler::Wait(uint64_t tick) {
 	KYTY_PROFILER_FUNCTION();
-	EXIT_IF(tick > CurrentTick());
-	if (tick == CurrentTick()) {
+	if (m_master.IsFree(tick)) [[likely]] {
+		return;
+	}
+
+	// Submit only if the current command buffer is active and open for recording.
+	if (tick == CurrentTick() && !m_command.IsInvalid()) {
 		CheckActive();
-		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
-		// Current(). The wrapper stays stable while its pooled Vulkan buffer is retired. Deferred
-		// resources are released only at the next GPU operation boundary.
-		KYTY_PROFILER_BLOCK("CommandScheduler::Wait (forced submit-then-wait)");
-		const auto submitted_tick = Submit();
-		EXIT_IF(submitted_tick != tick);
+		Submit();
 		m_master.Wait(tick);
 		BeginNext();
-		KYTY_PROFILER_END_BLOCK;
 	} else {
+		// Waiting for a previously submitted tick: no need to submit the current (possibly closed) buffer.
 		m_master.Wait(tick);
 	}
 }

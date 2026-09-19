@@ -181,8 +181,8 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_bda_pagetable_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
                              BDA_PAGETABLE_SIZE),
       m_memory_tracker(page_manager),
-      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 512 * MiB),
-      m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
+	m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 512 * MiB),
+	m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 128 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 32 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {
@@ -232,10 +232,19 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	KYTY_PROFILER_FUNCTION();
+
+	// Fast exit: if the region was not modified by the GPU, the host memory is already up-to-date
+	if (!m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+		if (is_write) {
+			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
+		}
+		return;
+	}
+
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
-		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
-		     vaddr, size);
+			 "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+			 vaddr, size);
 	}
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
@@ -244,7 +253,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
 		// Widen nearby CPU reads so they share one GPU drain.
-		constexpr uint64_t WindowSize   = 512 * 1024;
+		constexpr uint64_t WindowSize   = 128 * 1024; // Narrower window to reduce readback work
 		const auto         buffer_begin = buffer.CpuAddress();
 		const auto         buffer_end   = buffer_begin + buffer.Size();
 		const auto window_begin = std::max(Common::AlignDown(vaddr, WindowSize), buffer_begin);
