@@ -916,6 +916,10 @@ void InstallGpuResources(Graphics::RenderContext* resources) noexcept {
 }
 
 bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept {
+	// Delegate to the render context fault handler which performs the correct
+	// actions (invalidate caches, map or protect pages as needed). Returning
+	// true here without actually fixing host protections causes the VEH handler
+	// to retry the faulting instruction and produce a tight exception loop.
 	return g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr);
 }
 

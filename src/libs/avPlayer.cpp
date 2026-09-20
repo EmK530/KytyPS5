@@ -445,8 +445,14 @@ public:
 	}
 	void Notify() { available.notify_all(); }
 
+	// Return current queue size (for simple backpressure checks)
+	size_t Size() const {
+		std::lock_guard lock(mutex);
+		return queue.size();
+	}
+
 private:
-	std::mutex              mutex;
+	mutable std::mutex      mutex;
 	std::condition_variable available;
 	std::deque<DemuxPacket> queue;
 	size_t                  bytes    = 0;
@@ -505,6 +511,12 @@ private:
 template <typename T>
 class WorkQueue {
 public:
+	// Return current queue size (for simple backpressure checks)
+	size_t size() const {
+		std::lock_guard lock(mutex);
+		return queue.size();
+	}
+
 	void Push(T value) {
 		std::lock_guard lock(mutex);
 		queue.push_back(std::move(value));
@@ -1368,6 +1380,10 @@ private:
 			}
 			ready.info.time_stamp += timestamp_offset;
 			ready.timestamp_offset = timestamp_offset;
+			// If the consumer queue is growing too large, back off briefly to avoid busy-waiting
+			while (frames.size() >= 8 && !worker_stop) {
+				Common::Thread::SleepMicro(1000); // 1ms
+			}
 			frames.Push(std::move(ready));
 			av_frame_free(&frame);
 		}
