@@ -1500,6 +1500,23 @@ void VideoOutDriver::WaitFlipDone(int handle, int index) {
 	m_impl->GetFlipQueue().Wait(*ctx, index);
 }
 
+void VideoOutDriver::ThrottleFlip(int handle, int index) {
+	VideoOutFlipStatus status {};
+	if (VideoOutGetFlipStatus(handle, &status) == 0 && status.flipPendingNum > 1) {
+		for (int i = 0; i < 16; ++i) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			if (VideoOutGetFlipStatus(handle, &status) != 0) {
+				break;
+			}
+			if (status.flipPendingNum <= 1) {
+				return;
+			}
+		}
+	}
+	// Fallback: behave like the original wait if throttling didn't clear the queue.
+	WaitFlipDone(handle, index);
+}
+
 KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status) {
 	PRINT_NAME();
 

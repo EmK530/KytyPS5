@@ -751,21 +751,28 @@ PreparedBindings RenderExecutor::PrepareBindings(const ShaderStageRuntime& runti
 	const auto& snapshot = runtime.resources;
 	PreparedBindings prepared;
 	prepared.runtime = &runtime;
-	prepared.images.reserve(program.info.images.size());
-	for (uint32_t i = 0; i < program.info.images.size(); i++) {
+
+	const size_t num_images = program.info.images.size();
+	prepared.images.resize(num_images);
+	for (uint32_t i = 0; i < num_images; i++) {
 		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
-		prepared.images.push_back(std::move(binding));
+		prepared.images[i] = std::move(binding);
 	}
-	prepared.samplers.reserve(program.info.samplers.size());
-	for (uint32_t i = 0; i < program.info.samplers.size(); i++) {
-		prepared.samplers.push_back(NativeSampler(m_context, program, i, snapshot.samplers[i]));
+
+	const size_t num_samplers = program.info.samplers.size();
+	prepared.samplers.resize(num_samplers);
+	for (uint32_t i = 0; i < num_samplers; i++) {
+		prepared.samplers[i] = NativeSampler(m_context, program, i, snapshot.samplers[i]);
 	}
-	prepared.shader_data.reserve(program.bindings.ShaderDataDwords());
-	for (const auto reg: program.bindings.user_data_registers) {
-		prepared.shader_data.push_back(snapshot.user_data[reg - program.user_data_base]);
+
+	const size_t data_dwords = program.bindings.ShaderDataDwords();
+	prepared.shader_data.resize(data_dwords);
+	const size_t reg_count = program.bindings.user_data_registers.size();
+	for (size_t r = 0; r < reg_count; ++r) {
+		const auto reg = program.bindings.user_data_registers[r];
+		prepared.shader_data[r] = snapshot.user_data[reg - program.user_data_base];
 	}
-	prepared.shader_data.resize(program.bindings.ShaderDataDwords());
 	if (ShaderRecompiler::IR::FindBinding(
 	        program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::Gds) != nullptr) {
 		prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
@@ -803,8 +810,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	const auto& layout    = program.bindings;
 	EXIT_IF(prepared.buffer_sources.size() != program.info.buffers.size());
 
-	prepared.buffers.clear();
-	prepared.buffers.reserve(program.info.buffers.size());
+	prepared.buffers.resize(program.info.buffers.size());
 	EXIT_IF(prepared.shader_data.size() != layout.ShaderDataDwords());
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
 	          prepared.shader_data.end(), 0);
@@ -815,9 +821,9 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	};
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		uint32_t buffer_offset = 0;
-		prepared.buffers.push_back(NativeStorageBuffer(m_context, prepared.buffer_sources[i],
-		                                               program.info.buffers[i], program.stage, i,
-		                                               buffer_offset));
+		prepared.buffers[i] = NativeStorageBuffer(m_context, prepared.buffer_sources[i],
+												  program.info.buffers[i], program.stage, i,
+												  buffer_offset);
 		pack_memory_offset(i, buffer_offset);
 	}
 	if (ShaderRecompiler::IR::FindBinding(

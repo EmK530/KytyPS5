@@ -13,6 +13,13 @@
 #include <cstdio>
 #include <fmt/format.h>
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <processthreadsapi.h>
+#endif
+
 using namespace Common;
 using namespace Emulator;
 
@@ -343,6 +350,19 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+	PROCESS_POWER_THROTTLING_STATE powerThrottling{};
+	powerThrottling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+	powerThrottling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+	powerThrottling.StateMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+
+	SetProcessInformation(
+		GetCurrentProcess(),
+		ProcessPowerThrottling,
+		&powerThrottling,
+		sizeof(powerThrottling)
+	);
+#endif
 	VirtualMemory::Init();
 	InitializeThreads();
 

@@ -1,5 +1,7 @@
 // Internal memory address-space helpers included by memory.cpp.
-// Kept in the same translation unit because they depend on memory.cpp-local helpers.
+#include <shared_mutex>
+#include <cstdlib>
+#include <cstring>
 
 static constexpr uint64_t HOST_SYSTEM_MANAGED_MIN  = 0x0000040000ull;
 static constexpr uint64_t HOST_SYSTEM_MANAGED_MAX  = 0x07ffffbfffull;
@@ -12,6 +14,12 @@ static constexpr uint64_t HOST_SYSTEM_RESERVED_MAX = 0x0fffffffffull;
 static constexpr uint64_t HOST_USER_MIN            = 0x1000000000ull;
 #endif
 static constexpr uint64_t HOST_USER_MAX = 0xfbffffffffull;
+
+// Eager guest commit: enabled by default (hard-coded)
+static const bool s_eager_commit = true;
+static bool EagerGuestCommitEnabled() { return s_eager_commit; }
+
+static constexpr uint64_t EAGER_COMMIT_CHUNK = 16ull * 1024ull * 1024ull; // 16 MiB
 
 static bool GuestFreeRangeContains(uint64_t base, uint64_t range_size, uint64_t candidate,
                                    uint64_t size) {
@@ -193,7 +201,7 @@ public:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		const auto      end   = vaddr + size;
 		auto            first = m_maps.lower_bound(vaddr);
 		if (first != m_maps.begin()) {
@@ -450,7 +458,7 @@ public:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		const auto      end     = vaddr + size;
 		auto            current = vaddr;
 
@@ -476,7 +484,7 @@ private:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		const auto      end     = vaddr + size;
 		auto            current = vaddr;
 		while (current < end) {
@@ -636,7 +644,7 @@ private:
 
 	uint8_t*                     m_backing_base = nullptr;
 	uint64_t                     m_size         = 0;
-	std::mutex                   m_mutex;
+	mutable std::shared_mutex    m_mutex;
 	std::map<uint64_t, MapEntry> m_maps;
 };
 
@@ -707,7 +715,7 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
 			return vaddr >= range.first && vaddr + size <= range.first + range.second;
 		});
@@ -717,7 +725,7 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
 			return VirtualRangesOverlap(vaddr, size, range.first, range.second);
 		});
@@ -767,6 +775,34 @@ public:
 		const auto host_mode = VirtualMemory::IsExecute(mode)
 		                           ? VirtualMemory::Mode::ExecuteReadWrite
 		                           : VirtualMemory::Mode::ReadWrite;
+
+		// Eager commit: try to commit host pages for this guest range in chunks to avoid
+		// generating many page-faults/VEH callbacks. If the commit fails we fall back
+		// to the normal slow path (don't abort the mapping attempt).
+		if (EagerGuestCommitEnabled()) {
+			uint64_t offset = 0;
+			while (offset < size) {
+				auto chunk = std::min<uint64_t>(EAGER_COMMIT_CHUNK, size - offset);
+				const uint64_t addr = vaddr + offset;
+				bool committed = false;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+				void* ptr = VirtualAlloc2(GetCurrentProcess(), reinterpret_cast<void*>(addr), chunk,
+				                        MEM_COMMIT | MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
+				if (ptr != nullptr && reinterpret_cast<uint64_t>(ptr) == addr) {
+					committed = true;
+				}
+#else
+				if (mprotect(reinterpret_cast<void*>(addr), chunk, PROT_READ | PROT_WRITE) == 0) {
+					committed = true;
+				}
+#endif
+				if (!committed) {
+					// Best-effort only: if commit fails, stop eager committing further chunks.
+					break;
+				}
+				offset += chunk;
+			}
+		}
 		if (m_backing->MapExistingPlaceholderFixed(vaddr, size, backing_offset, host_mode,
 		                                           failure_reason)) {
 			EXIT_IF(!AddMappedUnlocked(vaddr, size, MappingType::Backing));
@@ -829,13 +865,13 @@ public:
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 	bool TestContainsFree(uint64_t vaddr, uint64_t size) {
-		std::lock_guard lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		return FindContaining(vaddr, size) != m_free.end();
 	}
 #endif
 
 	bool ReleaseFree(uint64_t vaddr, uint64_t size) {
-		std::lock_guard lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		return FindContaining(vaddr, size) != m_free.end();
 	}
 
@@ -1339,7 +1375,7 @@ private:
 #endif
 	}
 
-	std::mutex                                 m_mutex;
+	mutable std::shared_mutex                  m_mutex;
 	std::map<uint64_t, uint64_t>               m_free;
 	std::map<uint64_t, MappedRegion>            m_mapped;
 	std::vector<std::pair<uint64_t, uint64_t>> m_owned;

@@ -39,6 +39,7 @@ public:
 	void SubmitFlipPreparation(uint64_t request_id);
 	void WaitForSubmitSlot();
 	void WaitFlipDone(int handle, int index);
+    void ThrottleFlip(int handle, int index);
 
 	[[nodiscard]] Impl& State() noexcept;
 

@@ -132,6 +132,8 @@ private:
 	bool             m_motion_enabled  = true;
 	uint64_t         m_gyro_time       = 0;
 	ControllerState  m_state;
+		std::array<float, 3> m_gyro_bias {};
+		int                  m_still_samples = 0;
 	ControllerState  m_states[STATES_MAX];
 	bool             m_obtained[STATES_MAX] {};
 	uint32_t         m_states_num    = 0;
@@ -369,6 +371,12 @@ void GameController::Button(int id, uint32_t button, bool down) {
 
 		m_state.buttons = down ? m_state.buttons | button : m_state.buttons & ~button;
 
+		// Сброс ориентации по одновременному нажатию L3 + R3
+		if (down && (m_state.buttons & (PAD_BUTTON_L3 | PAD_BUTTON_R3)) ==
+						 (PAD_BUTTON_L3 | PAD_BUTTON_R3)) {
+			ResetOrientation();
+		}
+
 		AddState();
 	}
 }
@@ -430,55 +438,109 @@ void GameController::TouchPad(int id, int finger, bool down, float x, float y) {
 			m_state.buttons = down ? m_state.buttons | PAD_BUTTON_TOUCH_PAD
 			                       : m_state.buttons & ~PAD_BUTTON_TOUCH_PAD;
 		}
+		if (down && finger == 0) {
+			// Опционально: если зажали тачпад — вернуть ориентацию вперед
+			ResetOrientation();
+		}
 		AddState();
 	}
 }
 
 void GameController::Motion(int id, Sensor sensor, const float* data, uint64_t time_us) {
-	Common::LockGuard lock(m_mutex);
+	// Try to avoid blocking the caller thread: if the main mutex is busy,
+	// skip this sensor sample to reduce lock contention (high-rate events).
+	if (!m_mutex.TryLock()) {
+		return;
+	}
+	// We will manually Unlock() before every early return from this point.
 	if (id != m_active_id || !m_motion_enabled) {
+		m_mutex.Unlock();
 		return;
 	}
 
-	// Convert acceleration to G; angular velocity is already in rad/s.
 	if (sensor == Sensor::Accel) {
 		for (int i = 0; i < 3; i++) {
 			m_state.accel[i] = data[i] / SDL_STANDARD_GRAVITY;
 		}
 	} else {
-		std::copy_n(data, 3, m_state.gyro.begin());
-		// Do not extrapolate a single sample across lost reports (e.g. loss of window focus).
+		// Сырая угловая скорость с учётом смещения
+		float gx = data[0] - m_gyro_bias[0];
+		float gy = data[1] - m_gyro_bias[1];
+		float gz = data[2] - m_gyro_bias[2];
+
+		float speed_sq = gx * gx + gy * gy + gz * gz;
+		float accel_sq = m_state.accel[0] * m_state.accel[0] +
+						 m_state.accel[1] * m_state.accel[1] +
+						 m_state.accel[2] * m_state.accel[2];
+
+		// 1. Проверка на покой: угловая скорость близка к 0, а на акселерометре чистая гравитация 1G
+		bool is_stationary = (speed_sq < 0.0025f) && (std::abs(accel_sq - 1.0f) < 0.15f);
+
+		// Throttle processing to at most ~500 Hz: if the last processed gyro sample
+		// was within 2ms, skip this sample to reduce contention and CPU usage.
+		if (m_gyro_time != 0 && time_us > m_gyro_time && (time_us - m_gyro_time) < 2000) {
+			m_mutex.Unlock();
+			return;
+		}
+
+		if (is_stationary) {
+			m_still_samples++;
+			if (m_still_samples > 30) { // Если лежит неподвижно больше ~0.25 сек
+				// Калибруем аппаратное смещение (bias)
+				for (int i = 0; i < 3; i++) {
+					m_gyro_bias[i] += (data[i] - m_gyro_bias[i]) * 0.05f;
+				}
+				gx = 0.0f;
+				gy = 0.0f;
+				gz = 0.0f;
+			}
+		} else {
+			m_still_samples = 0;
+		}
+
+		m_state.gyro = {gx, gy, gz};
+
+		// Интеграция угла при движении
 		constexpr uint64_t max_gyro_interval_us = 100000;
 		if (m_gyro_time != 0 && time_us > m_gyro_time &&
-		    time_us - m_gyro_time <= max_gyro_interval_us) {
+			time_us - m_gyro_time <= max_gyro_interval_us) {
 			const float dt = static_cast<float>(time_us - m_gyro_time) * 0.000001f;
-			const float speed =
-			    std::sqrt(data[0] * data[0] + data[1] * data[1] + data[2] * data[2]);
-			const float half_angle = speed * dt * 0.5f;
-			const float scale      = speed > 0.0f ? std::sin(half_angle) / speed : 0.0f;
-			const float x          = data[0] * scale;
-			const float y          = data[1] * scale;
-			const float z          = data[2] * scale;
-			const float w          = std::cos(half_angle);
-			const auto  q          = m_state.orientation;
-			// Accumulate body-local rotation relative to connection / orientation reset.
-			m_state.orientation = {q[3] * x + q[0] * w + q[1] * z - q[2] * y,
-			                       q[3] * y - q[0] * z + q[1] * w + q[2] * x,
-			                       q[3] * z + q[0] * y - q[1] * x + q[2] * w,
-			                       q[3] * w - q[0] * x - q[1] * y - q[2] * z};
-			float length        = 0.0f;
-			for (float value: m_state.orientation) {
-				length += value * value;
+			const float speed = std::sqrt(gx * gx + gy * gy + gz * gz);
+
+			if (speed > 0.0001f) {
+				const float half_angle = speed * dt * 0.5f;
+				const float scale      = std::sin(half_angle) / speed;
+				const float x          = gx * scale;
+				const float y          = gy * scale;
+				const float z          = gz * scale;
+				const float w          = std::cos(half_angle);
+				const auto  q          = m_state.orientation;
+
+				m_state.orientation = {q[3] * x + q[0] * w + q[1] * z - q[2] * y,
+									   q[3] * y - q[0] * z + q[1] * w + q[2] * x,
+									   q[3] * z + q[0] * y - q[1] * x + q[2] * w,
+									   q[3] * w - q[0] * x - q[1] * y - q[2] * z};
+			}
+
+			// Нормализация кватерниона
+			float length = 0.0f;
+			for (float val : m_state.orientation) {
+				length += val * val;
 			}
 			length = std::sqrt(length);
-			for (float& value: m_state.orientation) {
-				value /= length;
+			if (length > 0.00001f) {
+				for (float& val : m_state.orientation) {
+					val /= length;
+				}
+			} else {
+				m_state.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
 			}
 		}
 		m_gyro_time = time_us;
 	}
 	m_state.time = LibKernel::KernelGetProcessTime();
 	AddState();
+	m_mutex.Unlock();
 }
 
 void GameController::SetMotionSensorState(bool enable) {
@@ -497,6 +559,8 @@ void GameController::ResetOrientation() {
 	Common::LockGuard lock(m_mutex);
 	m_state.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
 	m_gyro_time         = 0;
+	m_gyro_bias         = {};
+	m_still_samples     = 0;
 	m_state.time        = LibKernel::KernelGetProcessTime();
 	AddState();
 }
