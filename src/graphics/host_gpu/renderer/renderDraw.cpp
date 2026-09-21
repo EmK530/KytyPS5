@@ -1076,8 +1076,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
 		    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
 		        limits.maxMeshWorkGroupTotalCount) {
-			EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
+			std::printf("[WARN] mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
 			     draw.instance_count);
+			return;
+			//EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
+			     //draw.instance_count);
 		}
 	}
 
