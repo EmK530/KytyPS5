@@ -38,7 +38,7 @@ uint32_t DrawFlushInterval() {
 	static const uint32_t interval = [] {
 		const char* v = std::getenv("KYTY_DRAW_FLUSH_INTERVAL");
 		if (v == nullptr) {
-			return 16u;
+			return 256u;
 		}
 		return static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
 	}();
