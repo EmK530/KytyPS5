@@ -41,6 +41,7 @@ constexpr bool IsConfiguredUserIdValid(int32_t user_id) {
 struct ConfigOptions {
 	uint32_t               screen_width                = 1280;
 	uint32_t               screen_height               = 720;
+	bool                   window_stretch_enabled     = false;
 	std::string            user_name                   = "Kyty";
 	int32_t                user_id                     = DEFAULT_USER_ID;
 	std::string            audio_input_device;
@@ -110,6 +111,7 @@ bool GpuAssistedValidationEnabled();
 
 bool RenderDocEnabled();
 bool ReadbackLinearImagesEnabled();
+bool WindowStretchEnabled();
 bool PlayGoHackEnabled();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();

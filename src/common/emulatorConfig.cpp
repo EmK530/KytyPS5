@@ -135,6 +135,10 @@ bool ReadbackLinearImagesEnabled() {
 	return g_config->readback_linear_images;
 }
 
+bool WindowStretchEnabled() {
+	return g_config->window_stretch_enabled;
+}
+
 bool PlayGoHackEnabled() {
 	return g_config->playgo_hack_enabled;
 }
