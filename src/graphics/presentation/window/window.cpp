@@ -861,7 +861,8 @@ static void WindowCreate(WindowContext& context) {
 		EXIT("%s\n", SDL_GetError());
 	}
 
-	SDL_SetWindowResizable(context.window, SDL_FALSE);
+	SDL_SetWindowResizable(context.window,
+						  Config::WindowStretchEnabled() ? SDL_TRUE : SDL_FALSE);
 	context.UpdateIcon();
 }
 
