@@ -64,6 +64,14 @@ public:
 	void            BufferFlush();
 	void            BufferFlushAndWait();
 	void            BufferWait();
+	// See CommandScheduler::CompleteReleaseMemWrite -- only safe for a RELEASE_MEM that already
+	// wrote its guest-visible value synchronously and scheduled no interrupt callback.
+	void            CompleteReleaseMemWrite();
+	// See CommandScheduler::CompleteReleaseMemInterrupt -- for a RELEASE_MEM that DOES request a
+	// guest interrupt/event; uses a smaller batch bound as a hedge against delaying it.
+	void            CompleteReleaseMemInterrupt();
+	// See CommandScheduler::CompleteDraw -- called after every DrawIndex/DrawAuto.
+	void            CompleteDraw();
 	HW::Context&    GetCtx() { return m_ctx; }
 	HW::UserConfig& GetUcfg() { return m_ucfg; }
 	HW::Shader&     GetShCtx() { return m_sh_ctx; }
@@ -98,7 +106,7 @@ public:
 	void EmitGlobalBarrier();
 	void TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
-	                    uint32_t mode);
+						uint32_t mode, uint64_t args_addr = 0);
 	void DispatchIndirect(uint32_t data_offset, uint32_t mode);
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);
 	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);

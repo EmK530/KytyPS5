@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/passes/SrtCompiler.h"
 #include "graphics/shader/shaderBindings.h"
 
 #include <algorithm>
@@ -953,6 +954,9 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		MarkCleanFlatSlots(plan, Source(plan, source->indirect_image->heap_source),
 		                   plan.clean_flat_slots);
 	}
+	// Compiled once here, now that value_storage/descriptor_sources/srt_reads/control_flow/
+	// clean_flat_slots are all in their final, stable shape for this plan's whole lifetime.
+	plan.compiled_srt = std::make_unique<CompiledSrtProgram>(CompileSrtProgram(plan));
 	return plan;
 }
 

@@ -26,28 +26,52 @@ struct PadTriggerEffectStateInformation {
 	int32_t state[2];
 };
 
-static int KYTY_SYSV_ABI PadGetTriggerEffectState(int                               handle,
-                                                  PadTriggerEffectStateInformation* info) {
-	PRINT_NAME();
+static int KYTY_SYSV_ABI PadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(int handle, bool enabled) {
+    PRINT_NAME();
 
-	LOGF("\t handle = %d\n", handle);
+    LOGF("\t handle  = %d\n"
+         "\t enabled = %d\n",
+         handle, enabled ? 1 : 0);
 
-	if (info == nullptr) {
-		return -2137653243; /* 0x80960005 */
-	}
-
-	info->state[0] = 0;
-	info->state[1] = 0;
-
-	return 0;
+    return OK;
 }
 
-static int KYTY_SYSV_ABI PadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool enabled) {
-	PRINT_NAME();
+static int KYTY_SYSV_ABI PadGetTriggerEffectState(int                                   handle,
+                                                  PadTriggerEffectStateInformation* info) {
+    PRINT_NAME();
 
-	LOGF("\t enabled = %d\n", enabled ? 1 : 0);
+    if (info == nullptr) {
+        return -2137653243; /* 0x80960005 */
+    }
 
-	return OK;
+    // Читаем текущее состояние контроллера
+    Controller::PadData pad_data {};
+    Controller::PadReadState(handle, &pad_data);
+
+    // В SDK PS5:
+    // 0 = SCE_PAD_TRIGGER_EFFECT_STATE_STANDBY (покой / нет сопротивления)
+    // 1 = SCE_PAD_TRIGGER_EFFECT_STATE_ACTING  (эффект сопротивляется, игрок давит)
+    // 2 = SCE_PAD_TRIGGER_EFFECT_STATE_COMPLETED (курок успешно продавлен до упора)
+
+    // Проверяем L2 (порог снижен для надежности)
+    if (pad_data.analog_buttons_l2 >= 180) {
+        info->state[0] = 2; // Продавили до конца
+    } else if (pad_data.analog_buttons_l2 > 20) {
+        info->state[0] = 1; // В процессе нажатия
+    } else {
+        info->state[0] = 0; // Отпущен
+    }
+
+    // Проверяем R2 (порог снижен для надежности)
+    if (pad_data.analog_buttons_r2 >= 180) {
+        info->state[1] = 2; // Продавили до конца
+    } else if (pad_data.analog_buttons_r2 > 20) {
+        info->state[1] = 1; // В процессе нажатия
+    } else {
+        info->state[1] = 0; // Отпущен
+    }
+
+    return OK;
 }
 
 struct PadDeviceClassExtendedInformation {

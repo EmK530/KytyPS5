@@ -421,7 +421,7 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 static bool DrawHasValidVertexShader(const HW::Shader& sh_ctx) {
 
 	const auto& vs = sh_ctx.GetVs();
-	return vs.es_regs.data_addr != 0;
+	return ShaderAddressValid(vs.es_regs.data_addr);
 }
 
 static bool PixelShaderHasDepthOrCoverageSideEffects(const HW::ShaderRegisters& sh_regs) {
@@ -608,7 +608,7 @@ static bool DrawHasActivePixelShader(const CommandBuffer& buffer) {
 	const auto& ctx              = buffer.GetRegisters();
 	const auto& sh_regs          = ctx.GetShaderRegisters();
 	const bool  has_color_output = (ctx.GetRenderTargetMask() & sh_regs.m_cbShaderMask) != 0;
-	return buffer.GetShaders().GetPs().ps_regs.data_addr != 0 &&
+	return ShaderAddressValid(buffer.GetShaders().GetPs().ps_regs.data_addr) &&
 	       (has_color_output || PixelShaderHasDepthOrCoverageSideEffects(sh_regs));
 }
 
@@ -927,7 +927,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 		if ((mrt_mask & (1u << slot)) != 0) {
 			ResolveRenderColorTarget(buffer, state.color_info[state.color_count],
-			                         render_target_slice_offset, slot);
+									 render_target_slice_offset, slot);
 			if (state.color_info[state.color_count].image_id) {
 				state.color_count++;
 			}

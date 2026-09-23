@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/magicEnum.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
@@ -13,11 +14,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
-#include <magic_enum.hpp>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -917,6 +916,10 @@ void InstallGpuResources(Graphics::RenderContext* resources) noexcept {
 }
 
 bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept {
+	// Delegate to the render context fault handler which performs the correct
+	// actions (invalidate caches, map or protect pages as needed). Returning
+	// true here without actually fixing host protections causes the VEH handler
+	// to retry the faulting instruction and produce a tight exception loop.
 	return g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr);
 }
 
@@ -2325,8 +2328,8 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	     "\t flags    = 0x%08" PRIx32 "\n"
 	     "\t name     = %s\n"
 	     "\t gpu_mode = %s\n",
-	     in_addr, out_addr, len, magic_enum::enum_name(mode), static_cast<uint32_t>(flags), name,
-	     magic_enum::enum_name(gpu_mode));
+	     in_addr, out_addr, len, Common::EnumName(mode).c_str(), static_cast<uint32_t>(flags), name,
+	     Common::EnumName(gpu_mode).c_str());
 
 	MapGpuRange(out_addr, len);
 
@@ -3042,8 +3045,8 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	     "\t shared   = %s\n"
 	     "\t reason   = %s\n",
 	     in_addr, out_addr, static_cast<uint64_t>(direct_memory_start), len,
-	     magic_enum::enum_name(mode), static_cast<uint32_t>(flags), alignment,
-	     magic_enum::enum_name(gpu_mode), shared_backing ? "yes" : "no", shared_reason);
+	     Common::EnumName(mode).c_str(), static_cast<uint32_t>(flags), alignment,
+	     Common::EnumName(gpu_mode).c_str(), shared_backing ? "yes" : "no", shared_reason);
 
 	if (out_addr == 0) {
 		if (consumed_reservation) {
@@ -3306,7 +3309,7 @@ static bool ReplaceFixedRangeWithReserved(uint64_t start, uint64_t size) {
 			           "\t reserve-fixed replace: backend unmap failed at 0x%016" PRIx64
 			           ", size=0x%016" PRIx64 ", type=%s\n",
 			           chunk.range.start, chunk.range.size,
-			           magic_enum::enum_name(chunk.range.type));
+			           Common::EnumName(chunk.range.type).c_str());
 			if (!restore_chunks()) {
 				EXIT("reserve-fixed backend-unmap rollback failed\n");
 			}
@@ -3770,7 +3773,7 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot) {
 	}
 	g_virtual_ranges->Protect(aligned_addr, aligned_len, prot);
 
-	LOGF("\t prot: %s -> %s\n", magic_enum::enum_name(old_mode), magic_enum::enum_name(mode));
+	LOGF("\t prot: %s -> %s\n", Common::EnumName(old_mode).c_str(), Common::EnumName(mode).c_str());
 
 	return OK;
 }
@@ -3880,6 +3883,10 @@ static bool IsAligned(uint64_t value, uint64_t alignment) {
 	return alignment == 0 || (value & (alignment - 1u)) == 0;
 }
 
+static bool IsPowerOfTwo(uint64_t value) {
+	return value != 0 && (value & (value - 1u)) == 0;
+}
+
 static void MemoryPoolSubtractCommitted(uint64_t len) {
 	auto current = g_memory_pool_committed.load(std::memory_order_relaxed);
 	while (current != 0) {
@@ -3901,7 +3908,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolExpand(int64_t search_start, int64_t search_en
 	if (search_start < 0 || search_end <= search_start || len == 0 ||
 	    (len & (POOL_PAGE_SIZE - 1u)) != 0 || phys_addr_out == nullptr ||
 	    (alignment != 0 &&
-	     (!std::has_single_bit(alignment) || (alignment & (POOL_PAGE_SIZE - 1u)) != 0))) {
+	     (!IsPowerOfTwo(alignment) || (alignment & (POOL_PAGE_SIZE - 1u)) != 0))) {
 		return KERNEL_ERROR_EINVAL;
 	}
 	if (static_cast<uint64_t>(search_end - search_start) < len) {
@@ -3950,7 +3957,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolReserve(void* addr_in, size_t len, size_t alig
 		return KERNEL_ERROR_EINVAL;
 	}
 	if (alignment != 0 &&
-	    (!std::has_single_bit(alignment) || !IsAligned(alignment, POOL_RESERVE_ALIGNMENT))) {
+	    (!IsPowerOfTwo(alignment) || !IsAligned(alignment, POOL_RESERVE_ALIGNMENT))) {
 		return KERNEL_ERROR_EINVAL;
 	}
 

@@ -308,6 +308,8 @@ uint32_t ConstantI32(EmitterState& state, int32_t value);
 
 uint32_t ConstantF32(EmitterState& state, uint32_t bits);
 
+uint32_t FloatBits(float value);
+
 uint32_t ConstantF32Value(EmitterState& state, float value);
 
 uint32_t ConstantBool(EmitterState& state, bool value);
@@ -327,8 +329,7 @@ void     EmitMeshAllocate(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t MeshOutputPointer(EmitterState& state, IR::StageOutputKind kind, uint32_t index = 0);
 uint32_t MeshPrimitivePointer(EmitterState& state);
 
-DppTargetLane EmitDppPermTargetLane(EmitterState& state, uint32_t subid, uint32_t control,
-                                    uint32_t lane_bits);
+DppTargetLane EmitDppQuadPermTargetLane(EmitterState& state, uint32_t subid, uint32_t control);
 
 DppTargetLane EmitDppRowShiftTargetLane(EmitterState& state, uint32_t subid, uint32_t amount,
                                         bool left);
@@ -337,7 +338,7 @@ DppTargetLane EmitDppRowRotateRightTargetLane(EmitterState& state, uint32_t subi
 
 DppTargetLane EmitDppMirrorTargetLane(EmitterState& state, uint32_t subid, bool half_row);
 
-DppTargetLane EmitDppTargetLane(EmitterState& state, const IR::DppMoveFlags& flags);
+DppTargetLane EmitDppTargetLane(EmitterState& state, uint32_t control);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
 

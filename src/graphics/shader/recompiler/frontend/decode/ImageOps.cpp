@@ -3,7 +3,6 @@
 #include "graphics/shader/recompiler/frontend/decode/OpcodeTable.h"
 
 #include <algorithm>
-#include <bit>
 
 namespace Libs::Graphics::ShaderRecompiler::Decoder {
 namespace {
@@ -204,6 +203,18 @@ constexpr auto MIMG_SAMPLE_OPS = Detail::MakeOpcodeTable<0x100>(MIMG_SAMPLE_OPCO
 constexpr auto MIMG_GATHER_OPS = Detail::MakeOpcodeTable<0x100>(MIMG_GATHER_OPCODE_LIST);
 constexpr auto MIMG_ATOMIC_OPS = Detail::MakeOpcodeTable<0x100>(MIMG_ATOMIC_OPCODE_LIST);
 
+const MimgSampleInfo* LookupSample(uint32_t opcode) {
+	return Detail::FindOpcode(MIMG_SAMPLE_OPS, opcode);
+}
+
+const MimgGatherInfo* LookupGather(uint32_t opcode) {
+	return Detail::FindOpcode(MIMG_GATHER_OPS, opcode);
+}
+
+const Detail::OpcodeMap* LookupAtomic(uint32_t opcode) {
+	return Detail::FindOpcode(MIMG_ATOMIC_OPS, opcode);
+}
+
 Opcode DecodeMimgOpcode(uint32_t opcode, const MimgSampleInfo* sample, const MimgGatherInfo* gather,
                         const Detail::OpcodeMap* atomic) {
 	if (sample != nullptr) {
@@ -269,6 +280,10 @@ uint32_t CountDmaskComponents(uint32_t dmask) {
 	return count != 0 ? count : 1u;
 }
 
+bool IsSingleDmaskBit(uint32_t dmask) {
+	return dmask != 0u && (dmask & (dmask - 1u)) == 0u;
+}
+
 } // namespace
 
 ImageAddressComponent ImageAddressComponentLayout(uint32_t flags, uint32_t component) {
@@ -317,9 +332,9 @@ void DecodeMimg(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	const bool     r128   = ((word0 >> 15u) & 0x1u) != 0u;
 	const bool     a16    = ((word1 >> 30u) & 0x1u) != 0u;
 	const bool     d16    = ((word1 >> 31u) & 0x1u) != 0u;
-	const auto*    sample = Detail::FindOpcode(MIMG_SAMPLE_OPS, opcode);
-	const auto*    gather = Detail::FindOpcode(MIMG_GATHER_OPS, opcode);
-	const auto*    atomic = Detail::FindOpcode(MIMG_ATOMIC_OPS, opcode);
+	const auto*    sample = LookupSample(opcode);
+	const auto*    gather = LookupGather(opcode);
+	const auto*    atomic = LookupAtomic(opcode);
 
 	inst.pc                 = pc;
 	inst.word_count         = word_count;
@@ -349,7 +364,7 @@ void DecodeMimg(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	if (inst.opcode == Opcode::UNSUPPORTED) {
 		SetUnsupported(inst, Family::MIMG, opcode, "MIMG opcode is not implemented");
 	}
-	if (gather != nullptr && !std::has_single_bit(inst.dmask)) {
+	if (gather != nullptr && !IsSingleDmaskBit(inst.dmask)) {
 		SetUnsupported(inst, Family::MIMG, opcode,
 		               "MIMG image gather requires exactly one dmask bit");
 	}
@@ -367,7 +382,7 @@ void DecodeMimg(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 }
 
 const char* MimgSampleOpcodeName(uint32_t opcode) {
-	const auto* sample = Detail::FindOpcode(MIMG_SAMPLE_OPS, opcode);
+	const auto* sample = LookupSample(opcode);
 	return sample != nullptr ? sample->name : nullptr;
 }
 

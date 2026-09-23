@@ -334,13 +334,13 @@ std::filesystem::path MountPoints::ResolvePath(const std::string& mounted_name) 
 
 	// Match the entire guest path so a mount root works with or without a trailing slash.
 	const auto mounted_path = Common::FixDirectorySlash(mounted_name);
-	const auto it           = std::find_if(
+	const auto it = std::find_if(
 	    m_mount_pairs.begin(), m_mount_pairs.end(),
-	    [&mounted_path](const MountPair& p) { return mounted_path.starts_with(p.point); });
+	    [&mounted_path](const MountPair& p) { return Common::StartsWith(mounted_path, p.point); });
 	if (it != m_mount_pairs.end()) {
 		const auto& p = *it;
 		auto rel_path = Common::RemoveFirst(Common::FixFilenameSlash(mounted_name), p.point.size());
-		while (rel_path.starts_with('/')) {
+		while (Common::StartsWith(rel_path, '/')) {
 			rel_path = Common::RemoveFirst(rel_path, 1);
 		}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS

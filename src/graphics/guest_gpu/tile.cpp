@@ -4,12 +4,15 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/stringUtils.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/gpu_format.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <fmt/format.h>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -1270,9 +1273,9 @@ bool TileGetRenderTargetMipLayout(uint32_t width, uint32_t height, uint32_t pitc
 	return total_size.size != 0 && total_size.align == 65536;
 }
 
-void TileGetTextureSize(Prospero::BufferFormat format, uint32_t width, uint32_t height,
-                        uint32_t levels, Prospero::TileMode tile, TileSizeAlign* total_size,
-                        TileSizeOffset* level_sizes, TilePaddedSize* padded_size) {
+static void TileGetTextureSizeImpl(Prospero::BufferFormat format, uint32_t width, uint32_t height,
+								   uint32_t levels, Prospero::TileMode tile, TileSizeAlign* total_size,
+								   TileSizeOffset* level_sizes, TilePaddedSize* padded_size) {
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(levels == 0 || levels > 16);
@@ -1284,14 +1287,14 @@ void TileGetTextureSize(Prospero::BufferFormat format, uint32_t width, uint32_t 
 		uint32_t mip_size[16] {};
 
 		const uint32_t elements_w0 =
-		    std::max((width + element.texel_width - 1u) / element.texel_width, 1u);
+			std::max((width + element.texel_width - 1u) / element.texel_width, 1u);
 		const uint32_t elements_h0 =
-		    std::max((height + element.texel_height - 1u) / element.texel_height, 1u);
+			std::max((height + element.texel_height - 1u) / element.texel_height, 1u);
 		const bool compressed = element.texel_width != 1 || element.texel_height != 1;
 		for (uint32_t l = 0; l < levels; l++) {
 			uint32_t       padded_elements_h  = 0;
 			const uint32_t aligned_elements_w = CalcLinearAlignedLevelPitch(
-			    elements_w0, elements_h0, l, element.bytes, &padded_elements_h, &mip_size[l]);
+				elements_w0, elements_h0, l, element.bytes, &padded_elements_h, &mip_size[l]);
 			mip_pitch[l]  = aligned_elements_w * element.texel_width;
 			mip_height[l] = padded_elements_h * element.texel_height;
 			if (compressed) {
@@ -1301,7 +1304,7 @@ void TileGetTextureSize(Prospero::BufferFormat format, uint32_t width, uint32_t 
 		}
 
 		const uint32_t total = SetLinearMipChainLayout(levels, mip_pitch, mip_height, mip_size,
-		                                               level_sizes, padded_size);
+													   level_sizes, padded_size);
 
 		if (total_size != nullptr) {
 			total_size->size  = total;
@@ -1313,15 +1316,71 @@ void TileGetTextureSize(Prospero::BufferFormat format, uint32_t width, uint32_t 
 
 	TileSurfaceLayout            layout {};
 	const TileSurfaceDescription description {
-	    format, tile, TileSurfaceDimension::Dim2D, width, height, 1, levels, 1};
+		format, tile, TileSurfaceDimension::Dim2D, width, height, 1, levels, 1};
 	if (TileGetTiledTextureLayout(description, layout)) {
 		SetLegacyTiledMipLayout(layout, total_size, level_sizes, padded_size);
 		return;
 	}
 	if (total_size != nullptr && total_size->size == 0) {
-		EXIT("unknown format:\nformat = %u\nwidth  = %u\nheight = %u\nlevels = %u\ntile   = %u\n",
-		     static_cast<uint32_t>(format), width, height, levels, static_cast<uint32_t>(tile));
+		std::vector<std::string> list;
+		list.push_back(fmt::format("format = {}", static_cast<uint32_t>(format)));
+		list.push_back(fmt::format("width  = {}", width));
+		list.push_back(fmt::format("height = {}", height));
+		list.push_back(fmt::format("levels = {}", levels));
+		list.push_back(fmt::format("tile   = {}", static_cast<uint32_t>(tile)));
+		EXIT("unknown format:\n%s\n", Common::Concat(list, '\n').c_str());
 	}
+}
+
+void TileGetTextureSize(Prospero::BufferFormat format, uint32_t width, uint32_t height,
+						uint32_t levels, Prospero::TileMode tile, TileSizeAlign* total_size,
+						TileSizeOffset* level_sizes, TilePaddedSize* padded_size) {
+	// Fast L1 cache for hot-path size-only queries (Astro: millions of calls)
+	if (level_sizes == nullptr && padded_size == nullptr && total_size != nullptr) {
+		struct alignas(8) CacheKey {
+			uint32_t width;
+			uint32_t height;
+			uint16_t format;
+			uint8_t  tile;
+			uint8_t  levels;
+		};
+
+		union PackedKey {
+			CacheKey key;
+			uint64_t raw[2];
+		} pk {};
+
+		struct CacheEntry {
+			uint64_t      k0;
+			uint64_t      k1;
+			TileSizeAlign result;
+			bool          valid;
+		};
+
+		constexpr size_t kL1Size = 2048;
+		constexpr size_t kL1Mask = kL1Size - 1;
+		static thread_local CacheEntry s_l1_cache[kL1Size] {};
+
+		pk.key.width  = width;
+		pk.key.height = height;
+		pk.key.format = static_cast<uint16_t>(format);
+		pk.key.tile   = static_cast<uint8_t>(tile);
+		pk.key.levels = static_cast<uint8_t>(levels);
+
+		const size_t hash = ((pk.raw[0] ^ (pk.raw[1] * 0x9E3779B97F4A7C15ULL)) * 0xBF58476D1CE4E5B9ULL) >> 53;
+		const size_t idx  = hash & kL1Mask;
+
+		if (s_l1_cache[idx].valid && s_l1_cache[idx].k0 == pk.raw[0] && s_l1_cache[idx].k1 == pk.raw[1]) [[likely]] {
+			*total_size = s_l1_cache[idx].result;
+			return;
+		}
+
+		TileGetTextureSizeImpl(format, width, height, levels, tile, total_size, nullptr, nullptr);
+		s_l1_cache[idx] = { pk.raw[0], pk.raw[1], *total_size, true };
+		return;
+	}
+
+	TileGetTextureSizeImpl(format, width, height, levels, tile, total_size, level_sizes, padded_size);
 }
 
 void TileGetTextureTotalSize(Prospero::BufferFormat format, uint32_t width, uint32_t height,

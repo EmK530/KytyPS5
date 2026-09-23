@@ -22,6 +22,9 @@
 
 // IWYU pragma: no_include <intrin.h>
 
+#define KYTY_ENABLE_DEBUG_PRINTF
+#define KYTY_DBG_INPUT
+
 namespace Libs::Graphics {
 
 struct Presenter::Frame {
@@ -417,21 +420,23 @@ void Swapchain::Create() {
 	create_info.imageSharingMode = vk::SharingMode::eExclusive;
 	create_info.preTransform     = transform;
 	create_info.compositeAlpha   = composite;
-	switch (Config::GetPresentMode()) {
-		case Config::PresentMode::Mailbox:
-			create_info.presentMode = vk::PresentModeKHR::eMailbox;
+	// Prefer Mailbox (triple-buffering) or Immediate when available, otherwise FIFO.
+	vk::PresentModeKHR preferred = vk::PresentModeKHR::eFifo;
+	for (const auto mode : surface.present_modes) {
+		if (mode == vk::PresentModeKHR::eMailbox) {
+			preferred = mode;
 			break;
-		case Config::PresentMode::Immediate:
-			create_info.presentMode = vk::PresentModeKHR::eImmediate;
-			break;
-		case Config::PresentMode::Fifo:
-		default: create_info.presentMode = vk::PresentModeKHR::eFifo; break;
+		}
 	}
-	if (std::find(surface.present_modes.begin(), surface.present_modes.end(),
-	              create_info.presentMode) == surface.present_modes.end()) {
-		LOGF("warning: requested present mode is unavailable; falling back to Fifo\n");
-		create_info.presentMode = vk::PresentModeKHR::eFifo;
+	if (preferred == vk::PresentModeKHR::eFifo) {
+		for (const auto mode : surface.present_modes) {
+			if (mode == vk::PresentModeKHR::eImmediate) {
+				preferred = mode;
+				break;
+			}
+		}
 	}
+	create_info.presentMode = preferred;
 	create_info.clipped          = VK_TRUE;
 	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
 	                     "vkCreateSwapchainKHR");
