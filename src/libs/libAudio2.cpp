@@ -189,6 +189,7 @@ struct AudioOut2PortStateEntry {
 	AudioInternal::Format  audio_format  = AudioInternal::Format::Unknown;
 	int                    audio_handle  = 0;
 	const void*            pcm_data      = nullptr;
+	std::vector<uint8_t>   pcm_snapshot;
 };
 
 struct AudioOut2SpeakerArrayState {
@@ -352,15 +353,41 @@ static bool audioout2_context_has_queueable_device(AudioOut2ContextHandle ctx) {
 	return false;
 }
 
+static size_t audioout2_pcm_bytes(const AudioOut2PortStateEntry& state) {
+	const auto data_type = state.data_format & 0x7fu;
+	const auto bytes     = (data_type == 0 ? 4u : (data_type == 1 ? 2u : 0u));
+	return static_cast<size_t>(state.samples_num) * audioout2_data_format_channels(state.data_format) * bytes;
+}
+
 static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool blocking) {
 	std::vector<AudioInternal::OutputParam> params;
 	params.reserve(AudioInternal::OUT_PORTS_MAX);
+
+    // Snapshots of ports whose pointer is shared with another port in the same context.
+    std::vector<std::vector<uint8_t>> shared_pcm;
+    shared_pcm.reserve(AudioInternal::OUT_PORTS_MAX);
 
 	g_audioout2_port_mutex.Lock();
 	for (const auto& state: g_audioout2_ports) {
 		if (state.used && state.context == ctx && state.audio_handle > 0 &&
 		    state.pcm_data != nullptr && params.size() < AudioInternal::OUT_PORTS_MAX) {
-			params.push_back(AudioInternal::OutputParam {state.audio_handle, state.pcm_data});
+			const void* data = state.pcm_data;
+
+			bool shared = false;
+			for (const auto& other: g_audioout2_ports) {
+				if (&other != &state && other.used && other.context == ctx &&
+				    other.pcm_data == state.pcm_data) {
+					shared = true;
+					break;
+				}
+			}
+			if (shared && state.pcm_snapshot.size() == audioout2_pcm_bytes(state) &&
+			    !state.pcm_snapshot.empty()) {
+				shared_pcm.push_back(state.pcm_snapshot);
+				data = shared_pcm.back().data();
+			}
+
+			params.push_back(AudioInternal::OutputParam {state.audio_handle, data});
 		}
 	}
 	g_audioout2_port_mutex.Unlock();
@@ -680,6 +707,13 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(AudioOut2PortHandle       port,
 		g_audioout2_port_mutex.Lock();
 		if (auto* state = audioout2_find_port_locked(port); state != nullptr) {
 			state->pcm_data = pcm_data;
+
+			state->pcm_snapshot.clear();
+			const auto bytes = audioout2_pcm_bytes(*state);
+			if (pcm_data != nullptr && state->audio_handle > 0 && bytes != 0) {
+				state->pcm_snapshot.resize(bytes);
+				std::memcpy(state->pcm_snapshot.data(), pcm_data, bytes);
+			}
 		}
 		g_audioout2_port_mutex.Unlock();
 	}
