@@ -188,9 +188,7 @@ struct AudioOut2PortStateEntry {
 	uint32_t               samples_num   = 512;
 	AudioInternal::Format  audio_format  = AudioInternal::Format::Unknown;
 	int                    audio_handle  = 0;
-	const void*            pcm_data      = nullptr;
-	std::vector<uint8_t>   pcm_snapshot;
-	bool                   pcm_snapshot_fresh = false;
+	std::vector<uint8_t>   pcm_data;
 };
 
 struct AudioOut2SpeakerArrayState {
@@ -343,66 +341,41 @@ static AudioOut2PortStateEntry* audioout2_find_port_locked(AudioOut2PortHandle p
 	return nullptr;
 }
 
+static size_t audioout2_pcm_size(const AudioOut2PortStateEntry& state) {
+	const auto bytes_per_sample = (state.data_format & 0x7fu) == 1 ? sizeof(int16_t) : sizeof(float);
+	return static_cast<size_t>(state.samples_num) *
+	       audioout2_data_format_channels(state.data_format) * bytes_per_sample;
+}
+
 static bool audioout2_context_has_queueable_device(AudioOut2ContextHandle ctx) {
 	Common::LockGuard lock(g_audioout2_port_mutex);
 	for (const auto& state: g_audioout2_ports) {
 		if (state.used && state.context == ctx && state.audio_handle > 0 &&
-		    state.pcm_data != nullptr && AudioInternal::AudioOutHasDevice(state.audio_handle)) {
+		    !state.pcm_data.empty() && AudioInternal::AudioOutHasDevice(state.audio_handle)) {
 			return true;
 		}
 	}
 	return false;
 }
 
-static size_t audioout2_pcm_bytes(const AudioOut2PortStateEntry& state) {
-	const auto data_type = state.data_format & 0x7fu;
-	const auto bytes     = (data_type == 0 ? 4u : (data_type == 1 ? 2u : 0u));
-	return static_cast<size_t>(state.samples_num) * audioout2_data_format_channels(state.data_format) * bytes;
-}
-
 static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool blocking) {
+	// The backend consumes the buffers synchronously, but can block while pacing SDL's queue.
+	// Keep both PCM storage and port handles alive until it returns.
 	std::vector<AudioInternal::OutputParam> params;
 	params.reserve(AudioInternal::OUT_PORTS_MAX);
 
-    // Snapshots of ports whose pointer is shared with another port in the same context.
-    std::vector<std::vector<uint8_t>> shared_pcm;
-    shared_pcm.reserve(AudioInternal::OUT_PORTS_MAX);
-
-	g_audioout2_port_mutex.Lock();
-	for (auto& state: g_audioout2_ports) {
+	Common::LockGuard lock(g_audioout2_port_mutex);
+	for (const auto& state: g_audioout2_ports) {
 		if (state.used && state.context == ctx && state.audio_handle > 0 &&
-		    state.pcm_data != nullptr && params.size() < AudioInternal::OUT_PORTS_MAX) {
-			const void* data = state.pcm_data;
-
-            if (state.pcm_snapshot_fresh) {
-                state.pcm_snapshot_fresh = false;
-
-                bool shared = false;
-                for (const auto& other: g_audioout2_ports) {
-                    if (&other != &state && other.used && other.context == ctx &&
-                        other.pcm_data == state.pcm_data) {
-                        shared = true;
-                        break;
-                    }
-                }
-                
-                if (shared && state.pcm_snapshot.size() == audioout2_pcm_bytes(state) && !state.pcm_snapshot.empty()) {
-                    shared_pcm.push_back(state.pcm_snapshot);
-                    data = shared_pcm.back().data();
-                }
-            }
-
-			params.push_back(AudioInternal::OutputParam {state.audio_handle, data});
+		    !state.pcm_data.empty() && params.size() < AudioInternal::OUT_PORTS_MAX) {
+			params.push_back(AudioInternal::OutputParam {state.audio_handle, state.pcm_data.data()});
 		}
 	}
-	g_audioout2_port_mutex.Unlock();
 
-	if (params.empty()) {
-		return;
+	if (!params.empty()) {
+		(void)AudioInternal::AudioOutOutputs(params.data(), static_cast<uint32_t>(params.size()),
+		                                     blocking);
 	}
-
-	(void)AudioInternal::AudioOutOutputs(params.data(), static_cast<uint32_t>(params.size()),
-	                                     blocking);
 }
 
 static void audioout2_close_audio_handle(int audio_handle) {
@@ -711,19 +684,11 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(AudioOut2PortHandle       port,
 	if (has_pcm) {
 		g_audioout2_port_mutex.Lock();
 		if (auto* state = audioout2_find_port_locked(port); state != nullptr) {
-			state->pcm_data = pcm_data;
-
-			state->pcm_snapshot.clear();
-			state->pcm_snapshot_fresh = false;
-			const auto bytes = audioout2_pcm_bytes(*state);
-			// Real grains are a few KB; skip anything implausibly large, and ports without a device.
-			constexpr size_t MAX_PCM_SNAPSHOT_BYTES = 1u << 20;
-			if (pcm_data != nullptr && state->audio_handle > 0 && bytes != 0 &&
-			    bytes <= MAX_PCM_SNAPSHOT_BYTES &&
-			    AudioInternal::AudioOutHasDevice(state->audio_handle)) {
-				state->pcm_snapshot.resize(bytes);
-				std::memcpy(state->pcm_snapshot.data(), pcm_data, bytes);
-				state->pcm_snapshot_fresh = true;
+			if (pcm_data != nullptr && state->audio_format != AudioInternal::Format::Unknown) {
+				const auto* bytes = static_cast<const uint8_t*>(pcm_data);
+				state->pcm_data.assign(bytes, bytes + audioout2_pcm_size(*state));
+			} else {
+				state->pcm_data.clear();
 			}
 		}
 		g_audioout2_port_mutex.Unlock();
