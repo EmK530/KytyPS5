@@ -710,7 +710,11 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(AudioOut2PortHandle       port,
 
 			state->pcm_snapshot.clear();
 			const auto bytes = audioout2_pcm_bytes(*state);
-			if (pcm_data != nullptr && state->audio_handle > 0 && bytes != 0) {
+			// Real grains are a few KB; skip anything implausibly large, and ports without a device.
+			constexpr size_t MAX_PCM_SNAPSHOT_BYTES = 1u << 20;
+			if (pcm_data != nullptr && state->audio_handle > 0 && bytes != 0 &&
+			    bytes <= MAX_PCM_SNAPSHOT_BYTES &&
+			    AudioInternal::AudioOutHasDevice(state->audio_handle)) {
 				state->pcm_snapshot.resize(bytes);
 				std::memcpy(state->pcm_snapshot.data(), pcm_data, bytes);
 			}
