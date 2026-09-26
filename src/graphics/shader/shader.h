@@ -178,6 +178,9 @@ struct ShaderPixelInputInfo {
 	bool                                           ps_sample_mask_export_enable = false;
 	bool                                           ps_sample_shading            = false;
 	bool                                           dual_source_blending         = false;
+	// Target 0 uses a non-identity export mapping and blends with source alpha: also output the
+	// logical alpha as the second blend source (MRT1) so the blend factors see the guest's alpha.
+	bool                                           alpha_blend_source_remap     = false;
 	bool                                           ps_early_z                   = false;
 	bool                                           ps_execute_on_noop           = false;
 	ShaderStageRuntime                             stage;

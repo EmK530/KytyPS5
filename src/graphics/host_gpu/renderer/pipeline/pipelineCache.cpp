@@ -175,6 +175,71 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 	return false;
 }
 
+// How a guest blend state maps onto a color target whose export mapping moves the logical
+// components to other physical channels (see ColorComponentMapping).
+enum class BlendMappingSupport {
+	// Vulkan's blend state already gives the guest result.
+	Direct,
+	// Only source alpha is used: provide the logical alpha as a dual-source output.
+	SourceAlpha,
+	// Cannot be expressed with fixed-function blending on such a target.
+	Unsupported,
+};
+
+bool BlendFactorIsDualSource(uint8_t factor) {
+	return factor >= static_cast<uint8_t>(Prospero::BlendFactor::kSrc1Color) &&
+	       factor <= static_cast<uint8_t>(Prospero::BlendFactor::kOneMinusSrc1Alpha);
+}
+
+bool BlendFactorIsSourceAlpha(uint8_t factor) {
+	return factor == static_cast<uint8_t>(Prospero::BlendFactor::kSrcAlpha) ||
+	       factor == static_cast<uint8_t>(Prospero::BlendFactor::kOneMinusSrcAlpha);
+}
+
+bool BlendFactorUsesAlpha(uint8_t factor) {
+	switch (static_cast<Prospero::BlendFactor>(factor)) {
+		case Prospero::BlendFactor::kSrcAlpha:
+		case Prospero::BlendFactor::kOneMinusSrcAlpha:
+		case Prospero::BlendFactor::kDstAlpha:
+		case Prospero::BlendFactor::kOneMinusDstAlpha:
+		case Prospero::BlendFactor::kSrcAlphaSaturate:
+		case Prospero::BlendFactor::kSrc1Alpha:
+		case Prospero::BlendFactor::kOneMinusSrc1Alpha:
+		case Prospero::BlendFactor::kConstantAlpha:
+		case Prospero::BlendFactor::kOneMinusConstantAlpha: return true;
+		default: return false;
+	}
+}
+
+// Vulkan applies the color equation to the physical R, G and B channels and the alpha equation to
+// the physical A channel, and alpha factors read the physical alpha. The guest applies them to the
+// logical components, so they only agree when the logical alpha stays in the physical A channel.
+BlendMappingSupport ClassifyBlendMapping(const HW::BlendControl&              blend,
+                                         const Prospero::ColorComponentMapping& mapping) {
+	if (mapping.IsIdentity() || mapping.Map(3) == 3u) {
+		return BlendMappingSupport::Direct;
+	}
+	// The color equation now also runs on the channel that holds the logical alpha.
+	if (blend.separate_alpha_blend && (blend.alpha_srcblend != blend.color_srcblend ||
+	                                   blend.alpha_destblend != blend.color_destblend ||
+	                                   blend.alpha_comb_fcn != blend.color_comb_fcn)) {
+		return BlendMappingSupport::Unsupported;
+	}
+	if (BlendFactorIsDualSource(blend.color_srcblend) ||
+	    BlendFactorIsDualSource(blend.color_destblend)) {
+		return BlendMappingSupport::Unsupported;
+	}
+	const bool uses_alpha =
+	    BlendFactorUsesAlpha(blend.color_srcblend) || BlendFactorUsesAlpha(blend.color_destblend);
+	if (!uses_alpha) {
+		return BlendMappingSupport::Direct;
+	}
+	const bool only_source_alpha =
+	    (!BlendFactorUsesAlpha(blend.color_srcblend) || BlendFactorIsSourceAlpha(blend.color_srcblend)) &&
+	    (!BlendFactorUsesAlpha(blend.color_destblend) || BlendFactorIsSourceAlpha(blend.color_destblend));
+	return only_source_alpha ? BlendMappingSupport::SourceAlpha : BlendMappingSupport::Unsupported;
+}
+
 } // namespace
 
 struct PipelineCache::ProgramCache {
@@ -620,6 +685,16 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 			// MRT1 supplies a second blend source for the same render target as MRT0.
 			pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
 			pixel_info.target_export_mapping[1] = pixel_info.target_export_mapping[0];
+		} else if (blend.enable && !context.GetRenderTarget(0).info.blend_bypass &&
+		           pixel_info.target_output_mode[0] != 0 && pixel_info.target_output_mode[1] == 0 &&
+		           ClassifyBlendMapping(blend, pixel_info.target_export_mapping[0]) ==
+		               BlendMappingSupport::SourceAlpha) {
+			// The export mapping moves the logical alpha to another channel, so also export it
+			// as the second blend source (MRT1) and blend with that.
+			pixel_info.alpha_blend_source_remap = true;
+			pixel_info.dual_source_blending     = true;
+			pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
+			pixel_info.target_export_mapping[1] = {};
 		}
 	}
 	if (context.GetClipControl().clip_disable) {
@@ -719,7 +794,33 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		static_params.alpha_comb_fcn[slot]       = bc.alpha_comb_fcn;
 		static_params.alpha_destblend[slot]      = bc.alpha_destblend;
 		static_params.separate_alpha_blend[slot] = bc.separate_alpha_blend;
-		static_params.blend_enable[slot]         = bc.enable && !rt.info.blend_bypass;
+		// The guest blend state refers to logical components, but a non-identity export mapping
+		// moves them to other physical channels. Blending is kept when the result is the same, and
+		// alpha blending on the first target uses the logical alpha exported as a second source.
+		const bool alpha_remap =
+		    slot == 0 && ps_input_info != nullptr && ps_input_info->alpha_blend_source_remap;
+		bool blend_supported = true;
+		if (bc.enable && !rt.info.blend_bypass && !alpha_remap &&
+		    ClassifyBlendMapping(bc, colors[i].export_mapping) != BlendMappingSupport::Direct) {
+			blend_supported = false;
+			static std::atomic_bool warned = false;
+			if (!warned.exchange(true, std::memory_order_relaxed)) {
+				Log::WriteToConsoleAndLog(fmt::format(
+				    "Warning: blending is disabled for color targets whose channel order cannot "
+				    "express the guest blend state (slot={} mapping=0x{:02x} color={}/{} alpha={}/{} "
+				    "separate={}).\n",
+				    static_cast<unsigned>(slot),
+				    static_cast<unsigned>(colors[i].export_mapping.packed),
+				    static_cast<unsigned>(bc.color_srcblend),
+				    static_cast<unsigned>(bc.color_destblend),
+				    static_cast<unsigned>(bc.alpha_srcblend),
+				    static_cast<unsigned>(bc.alpha_destblend), bc.separate_alpha_blend ? 1 : 0));
+			}
+		}
+		static_params.blend_enable[slot] = bc.enable && !rt.info.blend_bypass && blend_supported;
+		if (alpha_remap) {
+			static_params.blend_alpha_source_remap = true;
+		}
 	}
 	const bool with_depth =
 	    depth.desc.view_info.format != vk::Format::eUndefined && static_cast<bool>(depth.image_id);

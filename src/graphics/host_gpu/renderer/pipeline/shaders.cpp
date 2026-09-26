@@ -412,6 +412,23 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		color_blend_attachment[i].alphaBlendOp =
 		    (static_params.separate_alpha_blend[i] ? GetBlendOp(static_params.alpha_comb_fcn[i])
 		                                           : color_blend_attachment[i].colorBlendOp);
+		if (i == 0 && static_params.blend_alpha_source_remap) {
+			// The second blend source holds the logical alpha in every channel, independent of
+			// where the export mapping placed it.
+			const auto source_alpha = [](vk::BlendFactor factor) {
+				switch (factor) {
+					case vk::BlendFactor::eSrcAlpha: return vk::BlendFactor::eSrc1Color;
+					case vk::BlendFactor::eOneMinusSrcAlpha:
+						return vk::BlendFactor::eOneMinusSrc1Color;
+					default: return factor;
+				}
+			};
+			auto& attachment                = color_blend_attachment[i];
+			attachment.srcColorBlendFactor  = source_alpha(attachment.srcColorBlendFactor);
+			attachment.dstColorBlendFactor  = source_alpha(attachment.dstColorBlendFactor);
+			attachment.srcAlphaBlendFactor  = source_alpha(attachment.srcAlphaBlendFactor);
+			attachment.dstAlphaBlendFactor  = source_alpha(attachment.dstAlphaBlendFactor);
+		}
 	}
 
 	vk::Bool32 color_write_enable[RENDER_COLOR_ATTACHMENTS_MAX] = {};

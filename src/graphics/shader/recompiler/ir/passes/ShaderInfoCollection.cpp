@@ -387,6 +387,11 @@ void CollectOutputs(const Program& program, ShaderStageInputInfo input_info, Sha
 				case ExportTargetKind::Mrt:
 					AddOutput(info, StageOutputKind::Mrt, export_info.index, export_info.index,
 					          fmt::format("out_mrt_{}", export_info.index));
+					if (program.stage == ShaderType::Pixel && export_info.index == 0 &&
+					    input_info.pixel != nullptr && input_info.pixel->alpha_blend_source_remap) {
+						// Second blend source carrying the logical alpha.
+						AddOutput(info, StageOutputKind::Mrt, 1, 1, "out_mrt_1");
+					}
 					break;
 				default: break;
 			}

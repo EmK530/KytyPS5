@@ -493,6 +493,23 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto vector_type = uint_output ? TypeU32Vector(state, 4) : TypeF32Vector(state, 4);
 		auto       value       = ExportVector(ctx, data, exp, uint_output);
 		if (state.program.stage == ShaderType::Pixel && exp.kind == IR::ExportTargetKind::Mrt &&
+		    exp.index == 0 && !uint_output && state.input_info.pixel->alpha_blend_source_remap) {
+			// Blend with the logical alpha: it is broadcast to the second blend source before the
+			// export mapping moves it to another channel.
+			for (const auto& binding: state.outputs) {
+				if (binding.kind != IR::StageOutputKind::Mrt || binding.index != 1) {
+					continue;
+				}
+				const auto alpha = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), alpha, value, 3);
+				const auto broadcast = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 4),
+				                          broadcast, alpha, alpha, alpha, alpha);
+				state.builder.AddFunction(spv::OpStore, binding.variable_id, broadcast);
+				break;
+			}
+		}
+		if (state.program.stage == ShaderType::Pixel && exp.kind == IR::ExportTargetKind::Mrt &&
 		    exp.index < state.input_info.pixel->target_export_mapping.size()) {
 			const auto mapping = state.input_info.pixel->target_export_mapping[exp.index];
 			if (!mapping.IsIdentity()) {
