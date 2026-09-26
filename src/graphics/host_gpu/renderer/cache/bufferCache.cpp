@@ -574,6 +574,28 @@ bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return m_gpu_modified_ranges.Intersects(vaddr, size);
 }
 
+void BufferCache::DiscardGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
+	if (!m_gpu_modified_ranges.Intersects(vaddr, size)) {
+		return;
+	}
+	m_gpu_modified_ranges.Subtract(vaddr, size);
+	// The tracker works on whole pages and must agree with the byte ranges, so only release pages
+	// that no longer hold any dirty bytes. Partially covered edge pages stay GPU-dirty.
+	const auto begin     = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto end       = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	uint64_t   run_start = begin;
+	for (auto page = begin; page <= end; page += TRACKER_PAGE_SIZE) {
+		const bool clean = page < end && !m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE);
+		if (clean) {
+			continue;
+		}
+		if (page > run_start) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(run_start, page - run_start);
+		}
+		run_start = page + TRACKER_PAGE_SIZE;
+	}
+}
+
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 	return m_memory_tracker.IsRegionCpuModified(vaddr, size);
 }

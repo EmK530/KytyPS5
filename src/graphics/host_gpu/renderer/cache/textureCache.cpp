@@ -1485,6 +1485,11 @@ void TextureCache::CommitGpuWrite(Image& image) {
 		image.RefreshComplete();
 	}
 	image.MarkGpuModified();
+	// The image now holds the newest contents of its memory. Buffer bytes written earlier (for
+	// example by a compute fill) are stale, and would otherwise keep the image from being saved.
+	if (!image.info.data.Empty()) {
+		m_buffer_cache.DiscardGpuDirtyBytes(image.info.data.address, image.info.data.size);
+	}
 }
 
 bool TextureCache::ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
