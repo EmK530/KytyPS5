@@ -56,10 +56,20 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
 			case Prospero::SamplerAnisoRatio::kFour: aniso_ratio = 4.0f; break;
 			case Prospero::SamplerAnisoRatio::kEight: aniso_ratio = 8.0f; break;
 			case Prospero::SamplerAnisoRatio::kSixteen: aniso_ratio = 16.0f; break;
-			default:
-				EXIT("unknown ratio: %d dwords=%08x,%08x,%08x,%08x\n",
-				     static_cast<int>(r.MaxAnisoRatio()), r.fields[0], r.fields[1], r.fields[2],
-				     r.fields[3]);
+			default: {
+				// Encodings 5-7 are reserved. Descriptors like this show up in slots the shader
+				// never samples, so use the maximum instead of stopping the emulator.
+				static bool warned = false;
+				if (!warned) {
+					warned = true;
+					LOGF("SamplerCache: reserved anisotropy ratio %d, using 16x, "
+					     "dwords=%08x,%08x,%08x,%08x\n",
+					     static_cast<int>(r.MaxAnisoRatio()), r.fields[0], r.fields[1],
+					     r.fields[2], r.fields[3]);
+				}
+				aniso_ratio = 16.0f;
+				break;
+			}
 		}
 	}
 
