@@ -147,6 +147,8 @@ struct SamplerResource {
 	uint32_t first_use_pc          = 0;
 	bool     force_point_filtering = false;
 	bool     depth_compare         = false;
+	// The guest sampler addresses texels directly. The shader normalizes the coordinates.
+	bool     unnormalized          = false;
 
 	bool operator==(const SamplerResource& other) const = default;
 };

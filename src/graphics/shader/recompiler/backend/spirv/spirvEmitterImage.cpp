@@ -473,6 +473,51 @@ uint32_t EmitOneDimensionalGatherLz(ValueEmitContext& ctx, const IR::MemoryInfo&
 	return result;
 }
 
+// Guest samplers can address texels directly. Vulkan's own unnormalized samplers forbid implicit
+// LOD, depth comparison and multi-level views, so the coordinates are normalized in the shader
+// instead and an ordinary sampler is used.
+uint32_t NormalizeTexelCoordinates(ValueEmitContext& ctx, uint32_t resource,
+                                   Decoder::ImageDimension dimension, uint32_t coord) {
+	auto&       state = ctx.state;
+	const auto& info  = ImageDimensionInfoFor(dimension);
+	if (info.multisampled != 0u) {
+		return coord;
+	}
+	state.builder.RequireCapability(spv::CapabilityImageQuery);
+	const auto image = LoadSampledImageDescriptor(state, resource);
+	const auto size  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageQuerySizeLod, ImageViewSizeType(state, dimension), size,
+	                          image, ConstantU32(state, 0));
+
+	const uint32_t        components = info.coordinate_components;
+	std::vector<uint32_t> words {spv::OpCompositeConstruct, TypeF32Vector(state, components),
+	                             state.builder.AllocateId()};
+	for (uint32_t index = 0; index < components; index++) {
+		auto value = coord;
+		if (components > 1u) {
+			value = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), value, coord, index);
+		}
+		if (index < info.spatial_components) {
+			auto extent = size;
+			if (components > 1u) {
+				extent = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), extent, size,
+				                          index);
+			}
+			const auto extent_f32 = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpConvertUToF, TypeF32(state), extent_f32, extent);
+			value = Binary(state, spv::OpFDiv, TypeF32(state), value, extent_f32);
+		}
+		words.push_back(value);
+	}
+	if (components == 1u) {
+		return words.back();
+	}
+	state.builder.AddFunction(words);
+	return words[2];
+}
+
 uint32_t PackImageTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t texel) {
 	const auto info = ImageConversionFormat(ctx.state, mem);
 	if (info.format == Prospero::BufferFormat::kInvalid) return texel;
@@ -713,7 +758,10 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			                              result_numeric_class, false, mem, true));
 			return;
 		}
-		const bool explicit_lod = HasFlag(mem, Decoder::ImageSampleFlagDerivative) ||
+		// Unnormalized samplers have no mip selection, so they sample level zero explicitly.
+		const bool unnormalized = mem.sampler < state.program.info.samplers.size() &&
+		                          state.program.info.samplers[mem.sampler].unnormalized;
+		const bool explicit_lod = unnormalized || HasFlag(mem, Decoder::ImageSampleFlagDerivative) ||
 		                          HasFlag(mem, Decoder::ImageSampleFlagLod) ||
 		                          HasFlag(mem, Decoder::ImageSampleFlagLevelZero) ||
 		                          state.program.stage != ShaderType::Pixel;
@@ -734,7 +782,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		}
 		uint32_t              operand_mask = 0;
 		std::vector<uint32_t> operands;
-		if (HasFlag(mem, Decoder::ImageSampleFlagDerivative)) {
+		if (HasFlag(mem, Decoder::ImageSampleFlagDerivative) && !unnormalized) {
 			operand_mask |= spv::ImageOperandsGradMask;
 			operands.push_back(
 			    CoordF32(ctx, mem, *address, layout.grad_x, dimension_info.spatial_components));
@@ -743,7 +791,8 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		} else if (explicit_lod) {
 			operand_mask |= spv::ImageOperandsLodMask;
 			auto lod = ZeroF32(state);
-			if (HasFlag(mem, Decoder::ImageSampleFlagLod) && layout.lod != NoImageComponent) {
+			if (!unnormalized && HasFlag(mem, Decoder::ImageSampleFlagLod) &&
+			    layout.lod != NoImageComponent) {
 				lod = AddressF32(ctx, mem, *address, layout.lod);
 			}
 			operands.push_back(lod);
@@ -753,10 +802,13 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		}
 		const auto EmitSample = [&](uint32_t resource) {
 			const auto& candidate = state.program.info.images[resource];
-			const auto coord =
+			auto coord =
 			    CoordF32(ctx, mem, *address, layout.coord,
 			             ImageDimensionInfoFor(candidate.dimension).coordinate_components,
 			             candidate.cube);
+			if (unnormalized && !candidate.cube) {
+				coord = NormalizeTexelCoordinates(ctx, resource, candidate.dimension, coord);
+			}
 			const auto            sampled = MakeSampledImage(state, resource, mem.sampler);
 			const auto            sample  = state.builder.AllocateId();
 			std::vector<uint32_t> sample_operands {result_type, sample, sampled, coord};

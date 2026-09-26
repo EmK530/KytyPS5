@@ -147,7 +147,9 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
 	sampler_info.minLod                  = min_lod;
 	sampler_info.maxLod                  = max_lod;
 	sampler_info.borderColor             = border;
-	sampler_info.unnormalizedCoordinates = (r.ForceUnormCoords() ? VK_TRUE : VK_FALSE);
+	// Unnormalized coordinates are emulated in the shader. Vulkan's own unnormalized samplers forbid
+	// implicit LOD, depth comparison and multi-level views, so the sampler stays normalized.
+	sampler_info.unnormalizedCoordinates = VK_FALSE;
 
 	if (r.ForceUnormCoords()) {
 		sampler_info.addressModeU     = vk::SamplerAddressMode::eClampToEdge;
@@ -158,7 +160,6 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
 		sampler_info.maxLod           = 0.0f;
 		sampler_info.anisotropyEnable = VK_FALSE;
 		sampler_info.maxAnisotropy    = 1.0f;
-		sampler_info.compareEnable    = VK_FALSE;
 		sampler_info.mipLodBias       = 0.0f;
 	}
 

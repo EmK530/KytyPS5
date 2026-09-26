@@ -29,8 +29,15 @@ struct ResourceSpecialization {
 		bool                          operator==(const Image&) const = default;
 	};
 
-	std::vector<Buffer> buffers;
-	std::vector<Image>  images;
+	struct Sampler {
+		// The descriptor addresses texels directly (force-unnormalized coordinates).
+		bool unnormalized                 = false;
+		bool operator==(const Sampler&) const = default;
+	};
+
+	std::vector<Buffer>  buffers;
+	std::vector<Image>   images;
+	std::vector<Sampler> samplers;
 
 	bool operator==(const ResourceSpecialization&) const = default;
 };
