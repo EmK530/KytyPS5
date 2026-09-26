@@ -29863,9 +29863,9 @@ void CheckRenderTargetFormatContract() {
       Prospero::ChannelLayout::k5_6_5, Prospero::ChannelType::kUNorm,
       Prospero::ChannelOrder::kStandard);
   Require("RenderTargetFormat", "RGB565 UNorm",
-          rgb565.format == vk::Format::eB5G6R5UnormPack16 &&
+          rgb565.format == vk::Format::eR5G6B5UnormPack16 &&
               rgb565.bytes_per_element == 2u &&
-              rgb565.export_mapping.IsIdentity(),
+              rgb565.export_mapping == Prospero::ColorMappingBgra,
           "RGB565 UNorm render-target tuple was rejected");
 
   const auto uint_format = TextureGetRenderTargetFormat(

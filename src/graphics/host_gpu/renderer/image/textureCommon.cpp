@@ -50,6 +50,10 @@ HostFormatInfo ResolveHostFormat(Prospero::BufferFormat guest_format,
 	}
 	const auto format = VulkanFormat(guest_format);
 	switch (guest_format) {
+		// B5G6R5 is not a required color-attachment format, R5G6B5 is. Use it with the red/blue
+		// swap so the packed bits match guest memory.
+		case Prospero::BufferFormat::k5_6_5UNorm:
+			return {vk::Format::eR5G6B5UnormPack16, Prospero::ColorMappingBgra};
 		case Prospero::BufferFormat::k5_5_5_1UNorm: return {format, Prospero::ColorMappingBgra};
 		case Prospero::BufferFormat::k1_5_5_5UNorm:
 		case Prospero::BufferFormat::k4_4_4_4UNorm: return {format, Prospero::ColorMappingAbgr};
