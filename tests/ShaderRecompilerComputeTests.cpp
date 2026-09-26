@@ -127,14 +127,9 @@ template <typename Cache>
 concept HasObtainBufferForImageWrite = requires(Cache &cache) {
   cache.ObtainBufferForImageWrite(uint64_t{1}, uint64_t{1});
 };
-template <typename Cache>
-concept HasDiscardGpuDirtyBytes = requires(Cache &cache) {
-  cache.DiscardGpuDirtyBytes(uint64_t{1}, uint64_t{1});
-};
 static_assert(!HasSynchronizeImageToBuffer<TextureCache>);
 static_assert(!HasObtainBufferForImageCopy<BufferCache>);
 static_assert(!HasObtainBufferForImageWrite<BufferCache>);
-static_assert(!HasDiscardGpuDirtyBytes<BufferCache>);
 
 template <typename Backing>
 concept HasLegacyImageLayout = requires(Backing &backing) { backing.layout; };
