@@ -306,6 +306,7 @@ LIB_NAME("SaveDataDialog", "SaveDataDialog");
 
 constexpr int SAVE_STATUS_NONE        = 0;
 constexpr int SAVE_STATUS_INITIALIZED = 1;
+constexpr int SAVE_STATUS_RUNNING     = 2;
 constexpr int SAVE_STATUS_FINISHED    = 3;
 constexpr int SAVE_RESULT_OK          = 0;
 constexpr int SAVE_BUTTON_ID_OK       = 1;
@@ -376,7 +377,15 @@ int KYTY_SYSV_ABI SaveDataDialogGetStatus() {
 int KYTY_SYSV_ABI SaveDataDialogUpdateStatus() {
 	PRINT_NAME();
 
-	return g_save_status;
+	// Some titles only accept a FINISHED status once they've observed at least one RUNNING poll
+	// after Open(); report RUNNING once, then flip to FINISHED for the following polls (Open()
+	// starts the dialog as RUNNING). GetStatus() stays a pure peek that never advances this.
+	const int status = g_save_status;
+	if (g_save_status == SAVE_STATUS_RUNNING) {
+		g_save_status = SAVE_STATUS_FINISHED;
+	}
+
+	return status;
 }
 
 int KYTY_SYSV_ABI SaveDataDialogGetResult(void* result) {
@@ -431,7 +440,7 @@ int KYTY_SYSV_ABI SaveDataDialogOpen(const void* param) {
 		}
 	}
 
-	g_save_status = SAVE_STATUS_FINISHED;
+	g_save_status = SAVE_STATUS_RUNNING;
 
 	return OK;
 }
