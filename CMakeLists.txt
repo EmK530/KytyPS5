@@ -679,6 +679,10 @@ if (WIN32)
 	target_link_libraries(kyty_emulator iphlpapi)
 	target_link_libraries(kyty_emulator setupapi)
 	target_link_libraries(kyty_emulator ws2_32)
+elseif (APPLE)
+	# libCes.cpp calls POSIX iconv() directly on macOS; <iconv.h> is available system-wide, but
+	# the symbols live in libiconv, which isn't linked automatically.
+	target_link_libraries(kyty_emulator iconv)
 endif()
 if (KYTY_CLANG_CL)
 	target_link_libraries(kyty_emulator onecore)
