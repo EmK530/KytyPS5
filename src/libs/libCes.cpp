@@ -7,6 +7,19 @@
 #include <array>
 #include <cstring>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <errno.h>
+#include <iconv.h>
+#endif
+
 namespace Libs {
 
 namespace LibCes {
@@ -213,6 +226,108 @@ static int KYTY_SYSV_ABI CesMbcsUcsContextInit(CesContext* context, const CesPro
 	return 0;
 }
 
+// SDL_SYSTEM_ICONV defaults off on Windows and macOS, so SDL3 falls back to its own minimal
+// built-in iconv there, which has no notion of CP932/Shift-JIS at all (only ASCII/Latin-1/UTF/UCS).
+// Use real conversion facilities on those platforms instead; Linux already links real system
+// iconv through SDL_iconv, so it's left untouched.
+using CesIconvT = SDL_iconv_t;
+
+static constexpr size_t CES_ICONV_ERROR  = static_cast<size_t>(-1);
+static constexpr size_t CES_ICONV_E2BIG  = static_cast<size_t>(-2);
+static constexpr size_t CES_ICONV_EILSEQ = static_cast<size_t>(-3);
+static constexpr size_t CES_ICONV_EINVAL = static_cast<size_t>(-4);
+
+#if defined(_WIN32)
+
+static CesIconvT CesIconvOpen(const char* /*tocode*/, const char* /*fromcode*/) {
+	return reinterpret_cast<CesIconvT>(1);
+}
+
+static int CesIconvClose(CesIconvT /*cd*/) {
+	return 0;
+}
+
+// CP932/Shift-JIS characters are always 1 or 2 bytes; decode/encode one character at a time via
+// the Win32 codepage-932 APIs, replicating SDL_iconv's chunked-conversion semantics and error codes.
+static size_t CesIconv(CesIconvT /*cd*/, const char** inbuf, size_t* inbytesleft, char** outbuf,
+                       size_t* outbytesleft) {
+	const auto* in = reinterpret_cast<const uint8_t*>(*inbuf);
+	while (*inbytesleft != 0) {
+		const uint8_t lead         = in[0];
+		const bool    is_lead_byte = (lead >= 0x81 && lead <= 0x9f) || (lead >= 0xe0 && lead <= 0xfc);
+		const size_t  char_len     = is_lead_byte ? 2 : 1;
+		if (*inbytesleft < char_len) {
+			*inbuf = reinterpret_cast<const char*>(in);
+			return CES_ICONV_EINVAL;
+		}
+
+		wchar_t   wide[2];
+		const int wide_len = MultiByteToWideChar(932, MB_ERR_INVALID_CHARS, reinterpret_cast<const char*>(in),
+		                                          static_cast<int>(char_len), wide, 2);
+		if (wide_len <= 0) {
+			*inbuf = reinterpret_cast<const char*>(in);
+			return CES_ICONV_EILSEQ;
+		}
+
+		char      utf8[8];
+		const int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wide, wide_len, utf8, sizeof(utf8), nullptr, nullptr);
+		if (utf8_len <= 0 || static_cast<size_t>(utf8_len) > *outbytesleft) {
+			*inbuf = reinterpret_cast<const char*>(in);
+			return CES_ICONV_E2BIG;
+		}
+
+		std::memcpy(*outbuf, utf8, static_cast<size_t>(utf8_len));
+		*outbuf += utf8_len;
+		*outbytesleft -= static_cast<size_t>(utf8_len);
+		in += char_len;
+		*inbytesleft -= char_len;
+	}
+	*inbuf = reinterpret_cast<const char*>(in);
+	return 0;
+}
+
+#elif defined(__APPLE__)
+
+// macOS always ships libiconv (unlike SDL's stripped-down fallback), and it supports CP932 —
+// call the real POSIX iconv directly, mirroring SDL_iconv's own thin wrapper over it.
+static CesIconvT CesIconvOpen(const char* tocode, const char* fromcode) {
+	return reinterpret_cast<CesIconvT>(iconv_open(tocode, fromcode));
+}
+
+static int CesIconvClose(CesIconvT cd) {
+	return iconv_close(reinterpret_cast<iconv_t>(cd));
+}
+
+static size_t CesIconv(CesIconvT cd, const char** inbuf, size_t* inbytesleft, char** outbuf, size_t* outbytesleft) {
+	const size_t result = iconv(reinterpret_cast<iconv_t>(cd), const_cast<char**>(inbuf), inbytesleft, outbuf,
+	                            outbytesleft);
+	if (result == static_cast<size_t>(-1)) {
+		switch (errno) {
+		case E2BIG: return CES_ICONV_E2BIG;
+		case EILSEQ: return CES_ICONV_EILSEQ;
+		case EINVAL: return CES_ICONV_EINVAL;
+		default: return CES_ICONV_ERROR;
+		}
+	}
+	return result;
+}
+
+#else
+
+static CesIconvT CesIconvOpen(const char* tocode, const char* fromcode) {
+	return SDL_iconv_open(tocode, fromcode);
+}
+
+static int CesIconvClose(CesIconvT cd) {
+	return SDL_iconv_close(cd);
+}
+
+static size_t CesIconv(CesIconvT cd, const char** inbuf, size_t* inbytesleft, char** outbuf, size_t* outbytesleft) {
+	return SDL_iconv(cd, inbuf, inbytesleft, outbuf, outbytesleft);
+}
+
+#endif
+
 static int ConvertMbcsToUtf8(CesContext* context, const uint8_t* source, uint32_t source_max,
                              uint32_t* source_len, uint8_t* destination, uint32_t destination_max,
                              uint32_t* destination_len, bool measure) {
@@ -246,8 +361,8 @@ static int ConvertMbcsToUtf8(CesContext* context, const uint8_t* source, uint32_
 		++source_size;
 	}
 	const bool bounded_end = source_max != 0 && source_size == source_max;
-	const auto converter   = SDL_iconv_open("UTF-8", context->profile->encoding);
-	EXIT_IF(converter == reinterpret_cast<SDL_iconv_t>(-1));
+	const auto converter   = CesIconvOpen("UTF-8", context->profile->encoding);
+	EXIT_IF(converter == reinterpret_cast<CesIconvT>(-1));
 
 	const char*           input      = reinterpret_cast<const char*>(source);
 	size_t                input_left = source_size;
@@ -258,16 +373,16 @@ static int ConvertMbcsToUtf8(CesContext* context, const uint8_t* source, uint32_
 		char* output = measure ? scratch.data() : reinterpret_cast<char*>(destination) + produced;
 		const size_t capacity    = measure ? scratch.size() : destination_max - 1 - produced;
 		size_t       output_left = capacity;
-		const auto   status      = SDL_iconv(converter, &input, &input_left, &output, &output_left);
+		const auto   status      = CesIconv(converter, &input, &input_left, &output, &output_left);
 		produced += capacity - output_left;
-		if (status == SDL_ICONV_E2BIG) {
+		if (status == CES_ICONV_E2BIG) {
 			if (measure) {
 				continue;
 			}
 			result = CES_ERROR_DST_BUFFER_END;
-		} else if (status == SDL_ICONV_EINVAL) {
+		} else if (status == CES_ICONV_EINVAL) {
 			result = bounded_end ? CES_ERROR_SRC_BUFFER_END : CES_ERROR_INVALID_ENCODE;
-		} else if (status == SDL_ICONV_EILSEQ || status == SDL_ICONV_ERROR) {
+		} else if (status == CES_ICONV_EILSEQ || status == CES_ICONV_ERROR) {
 			const auto* code = reinterpret_cast<const uint8_t*>(input);
 			const bool  lead =
 			    (code[0] >= 0x81 && code[0] <= 0x9f) || (code[0] >= 0xe0 && code[0] <= 0xfc);
@@ -277,7 +392,7 @@ static int ConvertMbcsToUtf8(CesContext* context, const uint8_t* source, uint32_
 		}
 		break;
 	} while (input_left != 0);
-	SDL_iconv_close(converter);
+	CesIconvClose(converter);
 
 	if (!measure) {
 		destination[produced] = 0;
