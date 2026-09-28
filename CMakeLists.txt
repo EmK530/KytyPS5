@@ -369,10 +369,6 @@ function(add_kyty_full_emulator_test target source)
 	target_include_directories(${target} PRIVATE ${inc_headers})
 	if (WIN32)
 		target_link_libraries(${target} iphlpapi)
-	elseif (APPLE)
-		# libCes.cpp calls POSIX iconv() directly on macOS; <iconv.h> is available system-wide,
-		# but the symbols live in libiconv, which isn't linked automatically.
-		target_link_libraries(${target} iconv)
 	endif()
 	if (KYTY_CLANG_CL)
 		target_link_libraries(${target} onecore)
@@ -494,6 +490,17 @@ add_executable(save_data_memory_tests EXCLUDE_FROM_ALL
 target_link_libraries(save_data_memory_tests common fmt::fmt)
 target_include_directories(save_data_memory_tests PRIVATE ${inc_headers})
 
+add_executable(ces_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CesTests.cpp")
+target_link_libraries(ces_tests common fmt::fmt SDL3::SDL3-static)
+target_include_directories(ces_tests PRIVATE ${inc_headers})
+
+add_executable(save_data_dialog_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SaveDataDialogTests.cpp"
+	"${KYTY_SOURCE_DIR}/libs/dialog.cpp"
+)
+target_link_libraries(save_data_dialog_tests common fmt::fmt)
+target_include_directories(save_data_dialog_tests PRIVATE ${inc_headers})
+
 add_kyty_full_emulator_test(http_uri_parse_tests
 	"${KYTY_TESTS_DIR}/HttpUriParseTests.cpp")
 
@@ -585,6 +592,8 @@ if(BUILD_TESTING)
 	add_test(NAME ngs2_sampler COMMAND $<TARGET_FILE:ngs2_sampler_tests>)
 	add_test(NAME pad_haptics COMMAND $<TARGET_FILE:pad_haptics_tests>)
 	add_test(NAME save_data_memory COMMAND $<TARGET_FILE:save_data_memory_tests>)
+	add_test(NAME ces COMMAND $<TARGET_FILE:ces_tests>)
+	add_test(NAME save_data_dialog COMMAND $<TARGET_FILE:save_data_dialog_tests>)
 	add_test(NAME http_uri_parse COMMAND $<TARGET_FILE:http_uri_parse_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME shader_recompiler_alignbyte
@@ -654,6 +663,8 @@ if(BUILD_TESTING)
 		ngs2_sampler_tests
 		pad_haptics_tests
 		save_data_memory_tests
+		ces_tests
+		save_data_dialog_tests
 		http_uri_parse_tests
 	)
 endif()
@@ -683,10 +694,6 @@ if (WIN32)
 	target_link_libraries(kyty_emulator iphlpapi)
 	target_link_libraries(kyty_emulator setupapi)
 	target_link_libraries(kyty_emulator ws2_32)
-elseif (APPLE)
-	# libCes.cpp calls POSIX iconv() directly on macOS; <iconv.h> is available system-wide, but
-	# the symbols live in libiconv, which isn't linked automatically.
-	target_link_libraries(kyty_emulator iconv)
 endif()
 if (KYTY_CLANG_CL)
 	target_link_libraries(kyty_emulator onecore)
