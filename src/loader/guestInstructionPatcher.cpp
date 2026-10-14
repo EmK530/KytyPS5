@@ -647,27 +647,32 @@ std::optional<s64> FramePointerStackDelta(const DecodedCodeInstruction& decoded,
 	return std::nullopt;
 }
 
+// Frame pointer offset (RBP - RSP) set by `mov rbp, rsp` or `lea rbp, [rsp + disp]`.
+std::optional<s64> SetFramePointer(const DecodedCodeInstruction& decoded) {
+	const auto& operands = decoded.operands;
+	if (operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+	    operands[0].reg.value != ZYDIS_REGISTER_RBP) {
+		return std::nullopt;
+	}
+	if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+	    operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+	    operands[1].reg.value == ZYDIS_REGISTER_RSP) {
+		return 0;
+	}
+	if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_LEA &&
+	    operands[1].mem.base == ZYDIS_REGISTER_RSP &&
+	    operands[1].mem.index == ZYDIS_REGISTER_NONE) {
+		return operands[1].mem.disp.value;
+	}
+	return std::nullopt;
+}
+
 // Frame pointer offset (RBP - RSP) after the instruction, or nullopt when RBP is not a frame
 // pointer the analysis can follow.
 std::optional<s64> TransferFramePointer(const DecodedCodeInstruction& decoded,
                                         std::optional<s64>            frame_offset) {
-	const auto& operands = decoded.operands;
 	if (WritesRegister(decoded, ZYDIS_REGISTER_RBP)) {
-		if (operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
-		    operands[0].reg.value != ZYDIS_REGISTER_RBP) {
-			return std::nullopt;
-		}
-		if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
-		    operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-		    operands[1].reg.value == ZYDIS_REGISTER_RSP) {
-			return 0;
-		}
-		if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_LEA &&
-		    operands[1].mem.base == ZYDIS_REGISTER_RSP &&
-		    operands[1].mem.index == ZYDIS_REGISTER_NONE) {
-			return operands[1].mem.disp.value;
-		}
-		return std::nullopt;
+		return SetFramePointer(decoded);
 	}
 	if (!frame_offset.has_value() || !decoded.changes_stack_pointer) {
 		return frame_offset;
@@ -683,51 +688,100 @@ std::optional<s64> TransferFramePointer(const DecodedCodeInstruction& decoded,
 // [rbp - disp] instead of [rsp - disp]; track RBP - RSP through the function and record those
 // operands at their RSP-relative offsets.
 void AnalyzeFramePointerRedZone(DecodedFunction& function) {
-	if (function.instructions.empty()) {
+	// Without a frame pointer set from RSP nothing changes.
+	if (std::ranges::none_of(function.instructions, [](const auto& entry) {
+		    return SetFramePointer(entry.second).has_value();
+	    })) {
 		return;
 	}
 
-	std::map<uintptr_t, std::optional<s64>> frame_in;
-	std::vector<uintptr_t>                  worklist;
-	const auto merge = [&](uintptr_t address, std::optional<s64> frame_offset) {
-		if (!function.instructions.contains(address)) {
-			return;
+	// Reused across functions; patching runs under the module lock, one function at a time.
+	thread_local std::vector<DecodedCodeInstruction*> instructions;
+	thread_local std::vector<uintptr_t>               addresses;
+	instructions.clear();
+	addresses.clear();
+	for (auto& [address, decoded]: function.instructions) {
+		instructions.push_back(&decoded);
+		addresses.push_back(address);
+	}
+	constexpr size_t NoInstruction = std::numeric_limits<size_t>::max();
+	const auto       index_of      = [&](uintptr_t address, size_t hint) {
+		if (hint < addresses.size() && addresses[hint] == address) {
+			return hint;
 		}
-		const auto [state, inserted] = frame_in.emplace(address, frame_offset);
-		if (!inserted) {
-			if (!state->second.has_value() || state->second == frame_offset) {
-				return;
-			}
-			state->second = std::nullopt;
-		}
-		worklist.push_back(address);
+		const auto found = std::ranges::lower_bound(addresses, address);
+		return found != addresses.end() && *found == address
+		           ? static_cast<size_t>(found - addresses.begin())
+		           : NoInstruction;
 	};
 
-	merge(function.instructions.begin()->first, std::nullopt);
-	// Jump-table edges are not modeled as successors, so their targets start unknown.
-	std::set<uintptr_t> direct_targets;
-	for (const auto& [_, decoded]: function.instructions) {
-		ForEachSuccessor(decoded, [&](uintptr_t target) { direct_targets.insert(target); });
+	// Successor indices; fall-through is usually the next instruction.
+	thread_local std::vector<std::array<size_t, 2>> successors;
+	thread_local std::vector<bool>                  direct_target;
+	successors.assign(instructions.size(), {NoInstruction, NoInstruction});
+	direct_target.assign(instructions.size(), false);
+	for (size_t index = 0; index < instructions.size(); ++index) {
+		size_t count = 0;
+		ForEachSuccessor(*instructions[index], [&](uintptr_t target) {
+			const size_t successor     = index_of(target, index + 1);
+			successors[index][count++] = successor;
+			if (successor != NoInstruction) {
+				direct_target[successor] = true;
+			}
+		});
 	}
+
+	enum class FrameState : u8 { Unvisited, Known, Unknown };
+	thread_local std::vector<FrameState> frame_state;
+	thread_local std::vector<s64>        frame_in;
+	thread_local std::vector<size_t>     worklist;
+	frame_state.assign(instructions.size(), FrameState::Unvisited);
+	frame_in.resize(instructions.size());
+	worklist.clear();
+	const auto merge = [&](size_t index, std::optional<s64> frame_offset) {
+		if (index == NoInstruction) {
+			return;
+		}
+		auto& state = frame_state[index];
+		if (state == FrameState::Unvisited) {
+			state           = frame_offset.has_value() ? FrameState::Known : FrameState::Unknown;
+			frame_in[index] = frame_offset.value_or(0);
+		} else if (state == FrameState::Unknown ||
+		           (frame_offset.has_value() && frame_in[index] == *frame_offset)) {
+			return;
+		} else {
+			state = FrameState::Unknown;
+		}
+		worklist.push_back(index);
+	};
+
+	merge(0, std::nullopt);
+	// Jump-table edges are not modeled as successors, so their targets start unknown.
 	for (const uintptr_t target: function.branch_targets) {
-		if (!direct_targets.contains(target)) {
-			merge(target, std::nullopt);
+		const size_t index = index_of(target, NoInstruction);
+		if (index != NoInstruction && !direct_target[index]) {
+			merge(index, std::nullopt);
 		}
 	}
 
 	while (!worklist.empty()) {
-		const uintptr_t address = worklist.back();
+		const size_t index = worklist.back();
 		worklist.pop_back();
-		const auto& decoded      = function.instructions.at(address);
-		const auto  frame_offset = TransferFramePointer(decoded, frame_in.at(address));
-		ForEachSuccessor(decoded, [&](uintptr_t target) { merge(target, frame_offset); });
+		const auto frame_offset =
+		    TransferFramePointer(*instructions[index], frame_state[index] == FrameState::Known
+		                                                   ? std::optional<s64>(frame_in[index])
+		                                                   : std::nullopt);
+		for (const size_t successor: successors[index]) {
+			merge(successor, frame_offset);
+		}
 	}
 
 	function.requires_conservative_red_zone_tracking = false;
-	for (auto& [address, decoded]: function.instructions) {
-		const auto state = frame_in.find(address);
-		if (state != frame_in.end() && state->second.has_value()) {
-			const s64 frame_offset = *state->second;
+	for (size_t instruction_index = 0; instruction_index < instructions.size();
+	     ++instruction_index) {
+		auto& decoded = *instructions[instruction_index];
+		if (frame_state[instruction_index] == FrameState::Known) {
+			const s64 frame_offset = frame_in[instruction_index];
 			if (decoded.changes_stack_pointer && !decoded.stack_pointer_delta.has_value()) {
 				decoded.stack_pointer_delta = FramePointerStackDelta(decoded, frame_offset);
 			}
